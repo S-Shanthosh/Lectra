@@ -1,0 +1,263 @@
+function main(workbook: ExcelScript.Workbook) {
+    //DailyReport(workbook);
+    //CreateRuleSheets(workbook);
+    GenerateMonthlyReport(workbook);
+}
+
+function DailyReport(workbook: ExcelScript.Workbook) {
+    console.log("initiating DailyReport process..");
+
+    const selectedSheet = workbook.getActiveWorksheet();
+    selectedSheet.setName("source sheet");
+
+    console.log("initiating source sheet");
+    initiate(workbook);
+
+    selectedSheet.delete();
+}
+
+function initiate(workbook: ExcelScript.Workbook) {
+    let selectedSheet = workbook.getWorksheet("source sheet");
+
+    // Cache used range once
+    const usedRange = selectedSheet.getUsedRange();
+    const lastRow = usedRange.getRowCount();
+    const lastCol = usedRange.getColumnCount();
+
+    // Get all data at once
+    let allData = usedRange.getValues();
+    const headerRow = allData[0] as string[];
+    const expectedHeader = "timestamp|terminatingRuleId|action|httpSourceName|httpSourceId|ruleGroupId|ruleId|clientIp|country|PLMUsername|Host|uri|args|httpVersion|httpMethod";
+
+    if (String(headerRow[0]) === expectedHeader) {
+
+        // Process data in batches using array operations
+        const processedData: any[][] = [];
+
+        for (let row = 0; row < lastRow; row++) {
+            const cellValue = allData[row][0];
+            const cellText = cellValue !== undefined && cellValue !== null ? String(cellValue) : "";
+
+            if (!cellText.includes("|")) {
+                processedData.push(allData[row]);
+                continue;
+            }
+
+            const splitValues = cellText.split("|");
+
+            // Process the row
+            const newRow = [];
+            for (let i = 0; i < splitValues.length; i++) {
+                let valueToSet = splitValues[i];
+                if (typeof valueToSet === "string" && valueToSet.startsWith("=")) {
+                    valueToSet = "'" + valueToSet;
+                }
+                newRow.push(valueToSet);
+            }
+            processedData.push(newRow);
+
+            if (row % 100 === 0) {
+                console.log("initiating source sheet row: " + row);
+            }
+        }
+
+        // Write all processed data back in one operation
+        selectedSheet.getRange(`A1:${getColumnLetter(processedData[0].length)}${lastRow}`).setValues(processedData);
+
+        // Format date column in bulk
+        const dateColumn = selectedSheet.getRange(`A2:A${lastRow}`);
+        const dateValues = dateColumn.getValues();
+        const formattedDates = dateValues.map(row => [row[0]]); // Keep as is, just format
+        dateColumn.setNumberFormat("dd/MM/yy");
+        dateColumn.setValues(formattedDates);
+
+        // Delete columns in one operation if possible
+        if (selectedSheet.getRange("B1").getValue() == "terminatingRuleId") {
+            // Combine deletions when possible
+            selectedSheet.getRange("B:E").delete(ExcelScript.DeleteShiftDirection.left);
+            selectedSheet.getRange("D:G").delete(ExcelScript.DeleteShiftDirection.left);
+            selectedSheet.getRange("F:G").delete(ExcelScript.DeleteShiftDirection.left);
+        }
+
+        // Batch replace operations
+        selectedSheet.replaceAll("AWS#AWS", "AWS", { completeMatch: false, matchCase: false });
+        selectedSheet.replaceAll("; ", ";", { completeMatch: false, matchCase: false });
+
+        // Process column expansions more efficiently
+        const ins_columns = ["C", "F"];
+        const column_value = ["ruleId", "uri"];
+        const new_columns = ["B", "E"];
+
+        for (let idx = 0; idx < ins_columns.length; idx++) {
+            const col = ins_columns[idx];
+            if (selectedSheet.getRange(`${col}1`).getValue() === column_value[idx]) {
+                // Insert columns
+                selectedSheet.getRange(`${col}:${col}`).insert(ExcelScript.InsertShiftDirection.right);
+                selectedSheet.getRange(`${col}:${col}`).insert(ExcelScript.InsertShiftDirection.right);
+
+                // Process data in bulk
+                const dataRange = selectedSheet.getRange(`${new_columns[idx]}1:${new_columns[idx]}${lastRow}`);
+                const allValues = dataRange.getValues();
+
+                // Find max splits first to determine column count
+                let maxSplits = 0;
+                const splitData = allValues.map(row => {
+                    const cellValue = row[0]?.toString() ?? "";
+                    const splitValues = cellValue.split(";").map(v => v.trim());
+                    maxSplits = Math.max(maxSplits, splitValues.length);
+                    return splitValues;
+                });
+
+                // Create uniform array for bulk write
+                const uniformData = splitData.map(splits => {
+                    const row = [...splits];
+                    while (row.length < maxSplits) row.push("");
+                    return row;
+                });
+
+                // Write all data at once
+                if (uniformData.length > 0) {
+                    const targetRange = selectedSheet.getRange(`${new_columns[idx]}1:${getColumnLetter(maxSplits)}${lastRow}`);
+                    targetRange.setValues(uniformData);
+                }
+            }
+        }
+    }
+
+    selectedSheet.setPosition(0);
+    console.log("initiating TransformData");
+    TransformData(workbook);
+}
+
+function TransformData(workbook: ExcelScript.Workbook) {
+    let sourceSheet = workbook.getWorksheet("source sheet");
+
+    // Get all data at once
+    const allData = sourceSheet.getUsedRange().getValues();
+
+    // Build output array directly
+    let output: any[][] = [["date", "ruleGroupId", "ruleId", "uri", "args"]];
+
+    for (let i = 1; i < allData.length; i++) {
+        const row = allData[i];
+        const rawDate = row[0];
+
+        let uri = row[7] as string;
+        if (typeof uri === "string" && uri.startsWith("=")) {
+            uri = "'" + uri;
+        }
+
+        let args = row[8] as string;
+        if (typeof args === "string" && args.startsWith("=")) {
+            args = "'" + args;
+        }
+
+        // Process all three rule combinations
+        for (let j = 1; j <= 3; j++) {
+            const ruleGroupId = row[j] as string;
+            const ruleId = row[j + 3] as string;
+
+            if (ruleGroupId || ruleId) {
+                output.push([rawDate, ruleGroupId, ruleId, uri, args]);
+            }
+        }
+
+        if (i % 100 === 0) {
+            console.log("TransformData row: " + i);
+        }
+    }
+
+    // Write directly to ConsolidationSheet without TempData
+    let targetSheet = workbook.getWorksheet("ConsolidationSheet");
+    if (!targetSheet) {
+        targetSheet = workbook.addWorksheet("ConsolidationSheet");
+    }
+
+    // Get existing data if any
+    let existingRows = 0;
+    const existingRange = targetSheet.getUsedRange();
+    if (existingRange) {
+        existingRows = existingRange.getRowCount();
+    }
+
+    // Write headers if needed
+    if (existingRows === 0) {
+        targetSheet.getRange("A1:E1").setValues([output[0]]);
+        existingRows = 1;
+    }
+
+    // Append new data
+    if (output.length > 1) {
+        targetSheet.getRangeByIndexes(existingRows, 0, output.length - 1, 5).setValues(output.slice(1));
+    }
+
+    // Format date column
+    const lastRow = targetSheet.getUsedRange().getRowCount();
+    if (lastRow > 1) {
+        const dateColumn = targetSheet.getRange(`A2:A${lastRow}`);
+        dateColumn.setNumberFormat("dd/MM/yy hh:mm:ss");
+    }
+
+    targetSheet.setPosition(1);
+
+    // Apply styling once at the end
+    Style_edit(workbook, targetSheet);
+
+    console.log("DailyReport Completed Successfully..");
+}
+
+function Style_edit(workbook: ExcelScript.Workbook, selectedSheet: ExcelScript.Worksheet) {
+    const columns = ["A", "B", "C", "D", "E"];
+    const column_value = ["Date", "Rule Set", "Rule", "URI", "Args"];
+    const columnWidths = [100.5, 171.75, 192.75, 180.5, 308.75];
+
+    // Set headers and column widths
+    columns.forEach((col, index) => {
+        selectedSheet.getRange(`${col}1`).setValue(column_value[index]);
+        selectedSheet.getRange(`${col}:${col}`).getFormat().setColumnWidth(columnWidths[index]);
+    });
+
+    // Apply header formatting
+    let headerRange = selectedSheet.getRange("A1:E1");
+    const headerFormat = headerRange.getFormat();
+    headerFormat.getFill().setColor("70AD47");
+    headerFormat.getFont().setBold(true);
+    headerFormat.setVerticalAlignment(ExcelScript.VerticalAlignment.center);
+    headerFormat.setHorizontalAlignment(ExcelScript.HorizontalAlignment.center);
+    headerFormat.setRowHeight(21);
+
+    // Freeze panes
+    selectedSheet.getFreezePanes().freezeAt(selectedSheet.getRange("1:1"));
+
+    // Apply borders to all data
+    let lastRow = selectedSheet.getUsedRange().getRowCount();
+    let lastCol = selectedSheet.getUsedRange().getColumnCount();
+
+    if (lastRow > 1) {
+        let range = selectedSheet.getRangeByIndexes(0, 0, lastRow, lastCol);
+        applyBorders(range);
+        range.getFormat().setWrapText(true);
+    }
+}
+
+function applyBorders(range: ExcelScript.Range) {
+    const borderIndices = ["insideHorizontal", "insideVertical", "edgeBottom", "edgeTop", "edgeLeft", "edgeRight"];
+
+    for (const border of borderIndices) {
+        const borderObj = range.getFormat().getRangeBorder(ExcelScript.BorderIndex[border]);
+        borderObj.setStyle(ExcelScript.BorderLineStyle.continuous);
+        borderObj.setColor("000000");
+        borderObj.setWeight(ExcelScript.BorderWeight.thin);
+    }
+}
+
+// Helper function to convert column number to letter
+function getColumnLetter(columnNumber: number): string {
+    let result = "";
+    while (columnNumber > 0) {
+        columnNumber--;
+        result = String.fromCharCode(65 + (columnNumber % 26)) + result;
+        columnNumber = Math.floor(columnNumber / 26);
+    }
+    return result;
+}
