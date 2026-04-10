@@ -1,0 +1,437 @@
+function main(workbook: ExcelScript.Workbook) {
+    //DailyReport(workbook);
+    GenerateMonthlyReport(workbook);
+}
+
+function DailyReport(workbook: ExcelScript.Workbook) {
+    console.log("initiating DailyReport process..");
+    const selectedSheet = workbook.getActiveWorksheet();
+    selectedSheet.setName("source sheet");
+    console.log("initiating source sheet");
+    initiate(workbook);
+    selectedSheet.delete();
+}
+
+function initiate(workbook: ExcelScript.Workbook) {
+    let selectedSheet = workbook.getWorksheet("source sheet");
+
+    // FIX: Read all values ONCE outside the loop (performance)
+    const usedRange = selectedSheet.getUsedRange();
+    const lastRow = usedRange.getRowCount();
+
+    if (selectedSheet.getRange("A1").getValue() == "timestamp|terminatingRuleId|action|httpSourceName|httpSourceId|ruleGroupId|ruleId|clientIp|country|PLMUsername|Host|uri|args|httpVersion|httpMethod") {
+
+        // FIX: Read entire column A at once instead of cell-by-cell inside loop
+        const colAValues = selectedSheet.getRange("A1:A" + lastRow).getValues();
+        for (let row = 0; row < lastRow; row++) {
+            const cellValue = colAValues[row][0];
+            const cellText = cellValue !== undefined && cellValue !== null ? String(cellValue) : "";
+            if (!cellText.includes("|")) {
+                continue;
+            } else {
+                const splitValues = cellText.split("|");
+                for (let i = 0; i < splitValues.length; i++) {
+                    let valueToSet = splitValues[i];
+                    if (typeof valueToSet === "string" && valueToSet.startsWith("=")) {
+                        valueToSet = "'" + valueToSet;
+                    }
+                    selectedSheet.getCell(row, i).setValue(valueToSet);
+                }
+            }
+        }
+        console.log("source sheet split complete, rows processed: " + lastRow);
+
+        // Format column A dates
+        let columnARange = selectedSheet.getRange("A2:A" + selectedSheet.getUsedRange().getRowCount());
+        const colADateValues = columnARange.getValues();
+        colADateValues.forEach((row, index) => {
+            let cell = columnARange.getCell(index, 0);
+            cell.setNumberFormat("dd/MM/yy");
+            cell.setValue(row[0]);
+        });
+
+        if (selectedSheet.getRange("B1").getValue() == "terminatingRuleId") {
+            selectedSheet.getRange("B:E").delete(ExcelScript.DeleteShiftDirection.left);
+            selectedSheet.getRange("D:G").delete(ExcelScript.DeleteShiftDirection.left);
+            selectedSheet.getRange("F:G").delete(ExcelScript.DeleteShiftDirection.left);
+        }
+        selectedSheet.replaceAll("AWS#AWS", "AWS", { completeMatch: false, matchCase: false });
+        selectedSheet.replaceAll("; ", ";", { completeMatch: false, matchCase: false });
+
+        const ins_columns = ["C", "F"];
+        const column_value = ["ruleId", "uri"];
+        const new_columns = ["B", "E"];
+
+        ins_columns.forEach((col, index) => {
+            if (selectedSheet.getRange(`${col}1`).getValue() === column_value[index]) {
+                selectedSheet.getRange(`${col}:${col}`).insert(ExcelScript.InsertShiftDirection.right);
+                selectedSheet.getRange(`${col}:${col}`).insert(ExcelScript.InsertShiftDirection.right);
+
+                // FIX: Read all values for the column at once (already done correctly here)
+                const currentLastRow = selectedSheet.getUsedRange().getRowCount();
+                const dataRange = selectedSheet.getRange(`${new_columns[index]}1:${new_columns[index]}${currentLastRow}`);
+                const allValues = dataRange.getValues();
+
+                allValues.forEach((rowValues, row) => {
+                    const cellValue = rowValues[0]?.toString() ?? "";
+                    const splitValues = cellValue.split(";").map(v => v.trim());
+                    selectedSheet
+                        .getRange(`${new_columns[index]}${row + 1}`)
+                        .getResizedRange(0, splitValues.length - 1)
+                        .setValues([splitValues]);
+                });
+                console.log(`Remodifying source sheet column ${col} complete`);
+            }
+        });
+    }
+
+    selectedSheet.setPosition(0);
+    console.log("initiating TransformData");
+    TransformData(workbook);
+}
+
+function formatExcelDate(excelDate: number): string {
+    const baseDate = new Date(1899, 11, 30);
+    const wholeDays = Math.floor(excelDate);
+    const fractionalDay = excelDate - wholeDays;
+    const datePart = new Date(baseDate.getTime() + wholeDays * 24 * 60 * 60 * 1000);
+    const totalSeconds = Math.round(fractionalDay * 86400);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    const pad = (n: number) => n.toString().padStart(2, '0');
+    const day = pad(datePart.getDate());
+    const month = pad(datePart.getMonth() + 1);
+    const year = datePart.getFullYear();
+    return `${day}/${month}/${year} ${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+}
+
+function TransformData(workbook: ExcelScript.Workbook) {
+    let sourceSheet = workbook.getWorksheet("source sheet");
+    const data = sourceSheet.getUsedRange().getValues();
+
+    // Log header row so column layout is visible in console for debugging
+    if (data.length > 0) {
+        console.log("Source sheet headers: " + data[0].map((v, i) => `[${i}]${v}`).join(" | "));
+    }
+
+    // Detect column indices dynamically from header row
+    // After initiate(): A=timestamp, B=ruleGroupId, C=ruleId[0], D=ruleId[1], E=ruleId[2],
+    //                   F=uri[0], G=uri[1], H=uri[2], I=args
+    // But ruleId and uri splits vary — find them by header name
+    const headers = data[0].map(h => String(h).toLowerCase().trim());
+    const idxRuleGroupId = headers.indexOf("rulegroupid");   // col B = 1
+    // ruleId split occupies cols C,D,E (indices 2,3,4) — find first occurrence
+    const idxRuleIdStart = headers.indexOf("ruleid");        // col C = 2
+    // uri split occupies next columns after ruleId — find by header
+    const idxUriStart = headers.indexOf("uri");
+    // args is after uri split columns
+    const idxArgs = headers.indexOf("args");
+
+    console.log(`Column indices — ruleGroupId:${idxRuleGroupId} ruleIdStart:${idxRuleIdStart} uriStart:${idxUriStart} args:${idxArgs}`);
+
+    let newSheet = workbook.getWorksheet("TempData");
+    if (newSheet) {
+        newSheet.delete();
+    }
+    newSheet = workbook.addWorksheet("TempData");
+    newSheet.getRange("A1:E1").setValues([["date", "ruleGroupId", "ruleId", "uri", "args"]]);
+    let output: (string | number | boolean)[][] = [];
+
+    for (let i = 1; i < data.length; i++) {
+        const row = data[i];
+        const rawDate = row[0];
+
+        const ruleGroupId = idxRuleGroupId >= 0 && row[idxRuleGroupId] != null
+            ? String(row[idxRuleGroupId]) : "";
+
+        // Collect all non-empty ruleId split values (cols from idxRuleIdStart up to idxUriStart)
+        let ruleIds: string[] = [];
+        if (idxRuleIdStart >= 0 && idxUriStart > idxRuleIdStart) {
+            for (let c = idxRuleIdStart; c < idxUriStart; c++) {
+                const v = row[c] != null ? String(row[c]).trim() : "";
+                if (v) ruleIds.push(v.substring(0, 31));
+            }
+        }
+
+        // Collect all non-empty uri split values (cols from idxUriStart up to idxArgs)
+        let uris: string[] = [];
+        if (idxUriStart >= 0 && idxArgs > idxUriStart) {
+            for (let c = idxUriStart; c < idxArgs; c++) {
+                const v = row[c] != null ? String(row[c]).trim() : "";
+                if (v) uris.push(v.startsWith("=") ? "'" + v : v);
+            }
+        }
+
+        let args = idxArgs >= 0 && row[idxArgs] != null ? String(row[idxArgs]) : "";
+        if (args.startsWith("=")) args = "'" + args;
+
+        // Use first URI (uri is per-request, not per-rule)
+        const uri = uris.length > 0 ? uris[0] : "";
+
+        // Emit one output row per ruleId (or one row if no ruleId but ruleGroupId exists)
+        if (ruleIds.length === 0 && ruleGroupId) {
+            output.push([rawDate, ruleGroupId, "", uri, args]);
+        } else {
+            for (const ruleId of ruleIds) {
+                if (ruleGroupId || ruleId) {
+                    output.push([rawDate, ruleGroupId, ruleId, uri, args]);
+                }
+            }
+        }
+    }
+    console.log("TransformData complete, output rows: " + output.length);
+
+    if (output.length > 0) {
+        newSheet.getRangeByIndexes(1, 0, output.length, 5).setValues(output);
+    }
+
+    let columnARange = newSheet.getRange("A2:A" + newSheet.getUsedRange().getRowCount());
+    const colAValues = columnARange.getValues();
+    colAValues.forEach((row, index) => {
+        let cell = columnARange.getCell(index, 0);
+        cell.setNumberFormat("dd/MM/yy hh:mm:ss");
+        cell.setValue(row[0]);
+    });
+
+    newSheet.setPosition(1);
+    console.log("initiating ConsolidationSheet");
+    ConsolidationSheet(workbook);
+    Style_edit(workbook, newSheet);
+    CreateRuleSheets(workbook);
+    newSheet.delete();
+    console.log("DailyReport Completed Successfully..");
+}
+
+function ConsolidationSheet(workbook: ExcelScript.Workbook) {
+    let usedRange = workbook.getWorksheet("TempData").getUsedRange();
+    if (!usedRange) return;
+
+    let values = usedRange.getValues();
+    if (values.length < 2) return;
+
+    let headers = values[0];
+
+    console.log("initiating ConsolidationSheet");
+
+    let targetSheet = workbook.getWorksheet("ConsolidationSheet");
+    if (!targetSheet) {
+        targetSheet = workbook.addWorksheet("ConsolidationSheet");
+        targetSheet.getRangeByIndexes(0, 0, 1, headers.length).setValues([headers]);
+    }
+
+    let tempSheet = workbook.getWorksheet("TempData");
+    let consolidationSheet = workbook.getWorksheet("ConsolidationSheet");
+    let tempUsedRange = tempSheet.getUsedRange();
+    let consolidationUsedRange = consolidationSheet.getUsedRange();
+    let tempRowCount = tempUsedRange.getRowCount();
+    let consolidationRowCount = consolidationUsedRange.getRowCount();
+    let tempDataToCopy = tempSheet.getRangeByIndexes(1, 0, tempRowCount - 1, tempUsedRange.getColumnCount());
+    let destinationRange = consolidationSheet.getRangeByIndexes(consolidationRowCount, 0, tempRowCount - 1, tempUsedRange.getColumnCount());
+    destinationRange.copyFrom(tempDataToCopy, ExcelScript.RangeCopyType.all);
+
+    Style_edit(workbook, targetSheet);
+}
+
+function Style_edit(workbook: ExcelScript.Workbook, selectedSheet: ExcelScript.Worksheet) {
+    const columns = ["A", "B", "C", "D", "E"];
+    const column_value = ["Date", "Rule Set", "Rule", "URI", "Args"];
+    const columnWidths = [100.5, 171.75, 192.75, 180.5, 308.75];
+    columns.forEach((col, index) => {
+        selectedSheet.getRange(`${col}1`).setValue(column_value[index]);
+        selectedSheet.getRange(`${col}:${col}`).getFormat().setColumnWidth(columnWidths[index]);
+    });
+
+    let headerRange = selectedSheet.getRange("A1:E1");
+    headerRange.getFormat().getFill().setColor("70AD47");
+    headerRange.getFormat().getFont().setBold(true);
+    headerRange.getFormat().setVerticalAlignment(ExcelScript.VerticalAlignment.center);
+    headerRange.getFormat().setHorizontalAlignment(ExcelScript.HorizontalAlignment.center);
+    headerRange.getFormat().setRowHeight(21);
+    selectedSheet.getFreezePanes().freezeAt(selectedSheet.getRange("1:1"));
+
+    let lastRow = selectedSheet.getUsedRange().getRowCount();
+    let lastCol = selectedSheet.getUsedRange().getColumnCount();
+    let range = selectedSheet.getRangeByIndexes(0, 0, lastRow, lastCol);
+    applyBorders(range);
+    range.getFormat().setWrapText(true);
+}
+
+function applyBorders(range: ExcelScript.Range) {
+    ["insideHorizontal", "insideVertical", "edgeBottom", "edgeTop", "edgeLeft", "edgeRight"].forEach(border => {
+        range.getFormat().getRangeBorder(ExcelScript.BorderIndex[border]).setStyle(ExcelScript.BorderLineStyle.continuous);
+        range.getFormat().getRangeBorder(ExcelScript.BorderIndex[border]).setColor("000000");
+        range.getFormat().getRangeBorder(ExcelScript.BorderIndex[border]).setWeight(ExcelScript.BorderWeight.thin);
+    });
+}
+
+function CreateRuleSheets(workbook: ExcelScript.Workbook) {
+    console.log("initiating CreateRuleSheets process..");
+    let sheet = workbook.getWorksheet("TempData");
+    let usedRange = sheet.getUsedRange();
+
+    // FIX: Read ALL values once into memory — no autofilter, no repeated getValues inside loop
+    let allValues = usedRange.getValues();
+    let headers = allValues[0];
+    let dataRows = allValues.slice(1);
+
+    // Get unique rule IDs from column C (index 2)
+    let uniqueRuleIds = Array.from(
+        new Set(
+            dataRows
+                .map(row => row[2])
+                .filter(v => v !== null && v !== "" && v !== "Rule")
+                .map(v => String(v))
+        )
+    );
+    console.log("total ruleId uniqueValues: " + uniqueRuleIds.length);
+
+    uniqueRuleIds.forEach((ruleId, i) => {
+        console.log("create ruleId sheet: " + (i + 1) + " Name: " + ruleId);
+
+        // FIX: Filter rows in-memory instead of using autofilter + getValues (avoids payload limit)
+        let filteredRows = dataRows.filter(row => String(row[2]) === ruleId);
+
+        let tempSheet = workbook.getWorksheet(ruleId);
+        if (!tempSheet) {
+            tempSheet = workbook.addWorksheet(ruleId);
+        }
+
+        // Apply header styling first
+        Style_edit(workbook, tempSheet);
+
+        // Find next empty row after existing data
+        let existingUsedRange = tempSheet.getUsedRange();
+        let nextRowIndex = existingUsedRange ? existingUsedRange.getRowCount() : 1;
+
+        // FIX: Write all filtered rows in a single batch setValues call
+        if (filteredRows.length > 0) {
+            tempSheet
+                .getRangeByIndexes(nextRowIndex, 0, filteredRows.length, filteredRows[0].length)
+                .setValues(filteredRows);
+        }
+    });
+
+    console.log("CreateRuleSheets Created Successfully..");
+}
+
+function GenerateMonthlyReport(workbook: ExcelScript.Workbook) {
+    console.log("initiating GenerateMonthlyReport process..");
+    let selectedSheet = workbook.getWorksheet("ConsolidationSheet");
+    let newSheet = selectedSheet.copy(ExcelScript.WorksheetPositionType.before, selectedSheet);
+
+    const usedRange = newSheet.getUsedRange();
+    const rowCount = usedRange.getRowCount();
+
+    // FIX: Read all date values at once, process in memory, write back in one call per chunk
+    const chunkSize = 1000;
+    for (let startRow = 1; startRow < rowCount; startRow += chunkSize) {
+        const endRow = Math.min(startRow + chunkSize - 1, rowCount - 1);
+        const range = newSheet.getRangeByIndexes(startRow, 0, endRow - startRow + 1, 1);
+        const values = range.getValues();
+
+        for (let i = 0; i < values.length; i++) {
+            let dateNum = values[i][0] as number;
+            if (typeof dateNum === 'number') {
+                const date = new Date(Math.round((dateNum - 25569) * 86400 * 1000));
+                const dd = String(date.getUTCDate()).padStart(2, '0');
+                const mm = String(date.getUTCMonth() + 1).padStart(2, '0');
+                const yy = String(date.getUTCFullYear()).slice(-2);
+                values[i][0] = `${dd}/${mm}/${yy}`;
+            }
+        }
+
+        range.setNumberFormat("@");
+        range.setValues(values);
+    }
+
+    newSheet.setName("ConsolidationSheet-new");
+    console.log("initiating createPivotTable process..");
+    createPivotTable(workbook, newSheet, 0, 0, 3, 200);
+    newSheet.delete();
+    selectedSheet.setName("ConsolidationSheet-old");
+    console.log("MonthlyReport Generated Successfully..");
+}
+
+function createPivotTable(workbook: ExcelScript.Workbook, sourceSheet: ExcelScript.Worksheet, startRow: number, colIndex: number, colCount: number, columnWidth: number) {
+    let rowCount = sourceSheet.getUsedRange().getRowCount();
+    let sourceRange = sourceSheet.getRangeByIndexes(startRow, colIndex, rowCount, colCount);
+    let newSheet = workbook.addWorksheet();
+    let pivotTable = workbook.addPivotTable("PivotTable1", sourceRange, newSheet.getRange("A1:C20"));
+    pivotTable.addRowHierarchy(pivotTable.getHierarchy("Rule Set"));
+    pivotTable.getRowHierarchy("Rule Set").setPosition(0);
+    pivotTable.addRowHierarchy(pivotTable.getHierarchy("Rule"));
+    pivotTable.getRowHierarchy("Rule").setPosition(1);
+    pivotTable.addColumnHierarchy(pivotTable.getHierarchy("Date"));
+    pivotTable.getColumnHierarchy("Date").setPosition(0);
+    pivotTable.addDataHierarchy(pivotTable.getHierarchy("Rule"));
+    pivotTable.getDataHierarchy("Count of Rule").setPosition(0);
+    pivotTable.getLayout().setLayoutType(ExcelScript.PivotLayoutType.compact);
+
+    let pivotRange = newSheet.getUsedRange();
+    pivotRange.getFormat().getFill().setColor("white");
+    pivotRange.getFormat().getFont().setBold(false);
+    pivotRange.getFormat().getFont().setColor("black");
+
+    let lastRow = newSheet.getUsedRange().getRowCount();
+    let lastCol = newSheet.getUsedRange().getColumnCount();
+    let newSheetRange = newSheet.getRangeByIndexes(0, 0, lastRow, lastCol);
+
+    newSheet.getRange(`${lastRow}:${lastRow}`).getFormat().getFill().setColor("00B050");
+    applyBorders(newSheetRange);
+    newSheet.setName("Consolidationtable");
+    newSheet.setPosition(1);
+
+    let newSheet2 = workbook.addWorksheet();
+    setHeaderRow();
+
+    function setHeaderRow() {
+        console.log("initiating style for PivotTable..");
+        let address = newSheet.getCell(0, lastCol - 2).getAddress().split("!")[1];
+        let lastColLetter = address.replace(/\d/g, "");
+
+        // FIX: Cast getValue() to string before calling split
+        let excelSerial = String(newSheet.getRange(`${lastColLetter}2`).getValue());
+        let parts = excelSerial.split("/");
+        let lastday = parseInt(parts[0], 10);
+        let month = parseInt(parts[1], 10);
+        let year = parseInt(parts[2], 10);
+
+        const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+        const monthName = monthNames[month - 1];
+
+        let header: (string | number | boolean)[] = [];
+        header.push(`WAF US PRD ${monthName}`);
+        for (let d = 1; d <= lastday; d++) {
+            header.push(`'${monthName.slice(0, 3)} ${d}`);
+        }
+        header.push("Grand Total");
+
+        newSheet2.getRange("A1").getResizedRange(0, header.length - 1).setValues([header]);
+        newSheet2.getRange("A1").getResizedRange(0, header.length - 1).setNumberFormat("@");
+
+        let _lastRow = newSheet2.getUsedRange().getRowCount();
+        let _lastCol = newSheet2.getUsedRange().getColumnCount();
+        let range = newSheet2.getRangeByIndexes(0, 0, _lastRow, _lastCol);
+        applyBorders(range);
+        range.getFormat().getFill().setColor("00B050");
+        range.getFormat().autofitColumns();
+
+        newSheet2.getRange("1:1").getFormat().setRowHeight(26.25);
+        newSheet2.getRange("A:A").getFormat().setColumnWidth(215);
+        newSheet2.getRange("1:1").getFormat().setHorizontalAlignment(ExcelScript.HorizontalAlignment.center);
+        newSheet2.getRange("1:1").getFormat().getFont().setBold(true);
+        newSheet2.getFreezePanes().freezeAt(newSheet2.getRange("1:1"));
+    }
+
+    let address = newSheet.getCell(0, lastCol - 1).getAddress().split("!")[1];
+    let lastColLetter = address.replace(/\d/g, "");
+    let consolidation_range = `A3:${lastColLetter}${lastRow}`;
+
+    newSheet2.getRange("A2").copyFrom(newSheet.getRange(consolidation_range), ExcelScript.RangeCopyType.all, false, false);
+    newSheet2.setName("Consolidation");
+    workbook.getWorksheet("ConsolidationSheet").setPosition(1);
+    newSheet2.setPosition(2);
+    newSheet.delete();
+    console.log("PivotTable Generated Successfully..");
+}
