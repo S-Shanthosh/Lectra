@@ -6,4 +6,4 @@ Convert Table to Range — click inside the green/white table → Table Design t
 Format painter, choose any white column and fill all the columns except cdate, timestamp
 Now format painter for  cdate, timestamp
 select full excel cells, click on no table
-Now excel is ready for scripting
+Now excel is ready for scripting.
