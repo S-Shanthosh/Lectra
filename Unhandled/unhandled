@@ -1,0 +1,74 @@
+function main(workbook: ExcelScript.Workbook) {
+    let selectedSheet = workbook.getActiveWorksheet();
+    const lastRow = selectedSheet.getUsedRange().getRowCount();
+    if (!workbook.getWorksheet("Exception Report")) {
+        if (selectedSheet.getRange("A1").getValue() == "tenant,\"id\",\"referenceno\",\"page\",\"errortype\",\"message\",\"stacktrace\",\"region\",\"timestamp\",\"cdate\"") {
+            const chunkSize = 1000;
+            for (let startRow = 0; startRow < lastRow; startRow += chunkSize) {
+                let endRow = Math.min(startRow + chunkSize, lastRow);
+                let sourceRange = selectedSheet.getRangeByIndexes(startRow, 0, endRow - startRow, 1);
+                let sourceValues = sourceRange.getValues();
+                let outputValues = sourceValues.map(row => row[0].toString().split(/[,]/).map(val => val.trim().replace(/"/g, '')));
+                const maxLength = Math.max(...outputValues.map(arr => arr.length));
+                outputValues = outputValues.map(row => {
+                    while (row.length < maxLength) {
+                        row.push('');
+                    }
+                    return row;
+                });
+                let destinationRange = selectedSheet.getRangeByIndexes(startRow, 1, outputValues.length, maxLength);
+                destinationRange.setValues(outputValues);
+            }
+            selectedSheet.getRange("A:A").delete(ExcelScript.DeleteShiftDirection.left);
+        }
+        const columns = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"];
+        const columnWidths = [47.25, 108.75, 61, 255.75, 225.75, 291.75, 534.75, 61.5, 72, 58.5];
+        columns.forEach((col, index) => {
+            let range = selectedSheet.getRange(`${col}:${col}`);
+            range.getFormat().setColumnWidth(columnWidths[index]);
+        });
+        let headerRange = selectedSheet.getRange("A1:J1");
+        headerRange.getFormat().getFill().setColor("D9E1F2");
+        headerRange.getFormat().getFont().setBold(true);
+        headerRange.getFormat().setVerticalAlignment(ExcelScript.VerticalAlignment.center);
+        headerRange.getFormat().setHorizontalAlignment(ExcelScript.HorizontalAlignment.center);
+        headerRange.getFormat().setRowHeight(21);
+        selectedSheet.getFreezePanes().freezeAt(selectedSheet.getRange("1:1"));
+        let lastCol = selectedSheet.getUsedRange().getColumnCount();
+        let dataRange = selectedSheet.getRangeByIndexes(0, 0, lastRow, lastCol);
+        applyBorders(dataRange);
+        dataRange.getFormat().setWrapText(true);
+        selectedSheet.setName("Exception Report");
+    }
+    if (!workbook.getWorksheet("Error Types")) {
+        createPivotTable(workbook, 0, 0, 5, 200);
+    }
+}
+function applyBorders(range: ExcelScript.Range) {
+    ["insideHorizontal", "insideVertical", "edgeBottom", "edgeTop", "edgeLeft", "edgeRight"].forEach(border => {
+        range.getFormat().getRangeBorder(ExcelScript.BorderIndex[border]).setStyle(ExcelScript.BorderLineStyle.continuous);
+        range.getFormat().getRangeBorder(ExcelScript.BorderIndex[border]).setColor("000000");
+        range.getFormat().getRangeBorder(ExcelScript.BorderIndex[border]).setWeight(ExcelScript.BorderWeight.thin);
+    });
+}
+function createPivotTable(workbook: ExcelScript.Workbook, startRow: number, colIndex: number, colCount: number, columnWidth: number) {
+    let sourceSheet = workbook.getWorksheet("Exception Report");
+    let rowCount = sourceSheet.getUsedRange().getRowCount();
+    let sourceRange = sourceSheet.getRangeByIndexes(startRow, colIndex, rowCount, colCount);
+    let newSheet = workbook.addWorksheet();
+    let pivotTable = workbook.addPivotTable("PivotTable1", sourceRange, newSheet.getRange("A1:C20"));
+    pivotTable.addDataHierarchy(pivotTable.getHierarchy("tenant")).setSummarizeBy(ExcelScript.AggregationFunction.count);
+    pivotTable.addRowHierarchy(pivotTable.getHierarchy("errortype"));
+    pivotTable.addColumnHierarchy(pivotTable.getHierarchy("tenant"));
+    newSheet.getFreezePanes().freezeAt(newSheet.getRange("1:2"));
+    newSheet.getRange("A:A").getFormat().setColumnWidth(columnWidth);
+    newSheet.getRange("A:A").getFormat().setWrapText(true);
+    let lastRow = newSheet.getUsedRange().getRowCount();
+    let lastCol = newSheet.getUsedRange().getColumnCount();
+    newSheet.getRangeByIndexes(0, 0, 2, lastCol).getFormat().setHorizontalAlignment(ExcelScript.HorizontalAlignment.center);
+    newSheet.getRangeByIndexes(0, 0, 2, lastCol).getFormat().setIndentLevel(0);
+    let newSheetRange = newSheet.getRangeByIndexes(0, 0, lastRow, lastCol);
+    applyBorders(newSheetRange);
+    newSheet.getRange("A1").getFormat().getFont().setColor("D9E1F2");
+    newSheet.setName("Error Types");
+}
