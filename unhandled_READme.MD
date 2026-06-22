@@ -9,6 +9,7 @@
 
 - Select your **Athena CSV** file
 - ⚠️ In the preview dialog, click **`Transform Data`** — ❌ **NOT** `Load`!
+- Now new window opens 
 
 ---
 
@@ -18,6 +19,7 @@
 - Click the **`123`** icon on the **`referenceno`** column header
 - Select **`Text`**
 - Choose **`Replace current`** ✅
+- Choose **`Close & Load`** ✅
 
 💡 *This prevents Excel from messing up long reference numbers (no more scientific notation or dropped leading zeros!)*
 
