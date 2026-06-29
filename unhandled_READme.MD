@@ -17,7 +17,7 @@
 > 🛠️ In the Power Query Editor:
 
 - Click the **`123`** icon on the **`referenceno`** column header
-- Select **`Text`**
+- Select **`Text`** that is **`ABC`**
 - Choose **`Replace current`** ✅
 - Choose **`Close & Load`** ✅
 
