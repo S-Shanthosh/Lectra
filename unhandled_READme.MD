@@ -81,4 +81,16 @@
 
 ---
 
-📌 *Save this file in your repo for quick reference before every script run!*
+
+
+📌 *Short Summary-NEW
+
+1️⃣ Data → From Text/CSV → Load
+
+2️⃣ Upload to SharePoint
+
+3️⃣ Run the script
+
+4️⃣ Table Design → Convert to Range → Yes
+
+5️⃣ Format Painter*
