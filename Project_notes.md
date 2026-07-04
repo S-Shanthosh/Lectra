@@ -1,1 +1,1 @@
-You should keep watching for Jobs run during the entire day, because, the tenant under issue , whose job is run, is the update for you
+You should keep monitoring the jobs throughout the day because whenever a job runs for the affected tenant, it provides an update on the issue.
