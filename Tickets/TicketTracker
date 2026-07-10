@@ -1,0 +1,174 @@
+"""
+generate_report.py
+
+Automates the Jira First Response Time report.
+
+WORKFLOW
+--------
+1. Export tickets from Jira as CSV (or .xlsx).
+2. Add ONE extra column to that export named exactly:  "First Response Time"
+   -> For each ticket, open it in Jira and paste in the first-response
+      timestamp shown there, e.g.:  June 30, 2026 at 4:07 PM
+3. Run this script:
+     python generate_report.py <raw_export_file> <ticket_tracker_file>
+4. The script appends the new tickets to the "Requests" sheet of the
+   Ticket Tracker workbook, in the management-ready format, and skips any
+   ticket that's already in the tracker (safe to re-run every week).
+
+COLUMN MAPPING (raw export -> Requests sheet)
+-----------------------------------------------
+Issue key                  -> Ticket No
+Summary                    -> Ticket Details
+Created                    -> Created Time (CEST)   (copied as-is)
+Created + 3:30             -> Created Time (IST)    (calculated)
+First Response Time        -> Acknowledged Time (CEST) (copied as-is)
+First Response Time + 3:30 -> Acknowledged Time (IST)  (calculated)
+Resolved                   -> Resolved Time (CEST)  (copied as-is)
+Reporter                   -> Reporter
+Assignee                   -> Assigned To
+Status                     -> Status
+
+ASSUMPTIONS (change the constants below if these don't hold)
+--------------------------------------------------------------
+- Jira's "Created"/"Resolved"/"First Response Time" values are already in
+  CEST (this matched every row in the sample Ticket_Tracker.xlsx you gave me).
+- IST is CEST + 3 hours 30 minutes (also matched the sample data).
+- New tickets are appended to the "Requests" sheet; duplicates (same
+  Ticket No already present) are skipped, not re-added.
+"""
+
+import sys
+from datetime import timedelta
+from pathlib import Path
+
+import pandas as pd
+from openpyxl import load_workbook
+from copy import copy
+
+# ---- Config -----------------------------------------------------------
+IST_OFFSET = timedelta(hours=3, minutes=30)   # CEST -> IST
+TARGET_SHEET = "Requests"
+RAW_SHEET_NAME = 0  # first sheet, for raw .xlsx exports
+
+REQUIRED_RAW_COLUMNS = [
+    "Issue key", "Summary", "Created", "Reporter",
+    "Assignee", "Status", "Resolved", "First Response Time",
+]
+
+TEMPLATE_COLUMNS = [
+    "Ticket No", "Ticket Details", "Created Time (CEST)",
+    "Acknowledged Time (CEST)", "Resolved Time (CEST)",
+    "Created Time (IST)", "Acknowledged Time (IST)",
+    "Reporter", "Assigned To", "Status",
+]
+
+
+def load_raw(raw_path: Path) -> pd.DataFrame:
+    if raw_path.suffix.lower() == ".csv":
+        df = pd.read_csv(raw_path)
+    else:
+        df = pd.read_excel(raw_path, sheet_name=RAW_SHEET_NAME)
+
+    missing = [c for c in REQUIRED_RAW_COLUMNS if c not in df.columns]
+    if missing:
+        raise ValueError(
+            "Raw export is missing required column(s): "
+            f"{missing}. Did you add the 'First Response Time' column "
+            "with values copied from each Jira ticket?"
+        )
+    return df
+
+
+def build_report_rows(df: pd.DataFrame) -> pd.DataFrame:
+    out = pd.DataFrame()
+    out["Ticket No"] = df["Issue key"]
+    out["Ticket Details"] = df["Summary"]
+
+    created = pd.to_datetime(df["Created"])
+    resolved = pd.to_datetime(df["Resolved"])
+    acknowledged = pd.to_datetime(df["First Response Time"])
+
+    out["Created Time (CEST)"] = created
+    out["Acknowledged Time (CEST)"] = acknowledged
+    out["Resolved Time (CEST)"] = resolved
+    out["Created Time (IST)"] = created + IST_OFFSET
+    out["Acknowledged Time (IST)"] = acknowledged + IST_OFFSET
+
+    out["Reporter"] = df["Reporter"]
+    out["Assigned To"] = df["Assignee"]
+    out["Status"] = df["Status"]
+
+    return out[TEMPLATE_COLUMNS]
+
+
+def append_to_tracker(report_df: pd.DataFrame, tracker_path: Path, output_path: Path):
+    wb = load_workbook(tracker_path)
+    if TARGET_SHEET not in wb.sheetnames:
+        raise ValueError(f"'{TARGET_SHEET}' sheet not found in {tracker_path.name}")
+    ws = wb[TARGET_SHEET]
+
+    header = [cell.value for cell in ws[1]]
+    while header and header[-1] is None:
+        header.pop()
+    if header != TEMPLATE_COLUMNS:
+        raise ValueError(
+            f"Header row in '{TARGET_SHEET}' does not match the expected "
+            f"template columns.\nExpected: {TEMPLATE_COLUMNS}\nFound:    {header}"
+        )
+
+    # Existing ticket numbers, to avoid duplicate rows on re-run
+    existing_tickets = {
+        ws.cell(row=r, column=1).value
+        for r in range(2, ws.max_row + 1)
+        if ws.cell(row=r, column=1).value
+    }
+
+    last_row = 1
+    for r in range(2, ws.max_row + 1):
+        if ws.cell(row=r, column=1).value not in (None, ""):
+            last_row = r
+    # Style template: copy formatting from the last existing data row (row 2 as fallback)
+    style_row = last_row if last_row >= 2 else 2
+
+    added, skipped = 0, 0
+    next_row = last_row + 1
+
+    for _, row in report_df.iterrows():
+        if row["Ticket No"] in existing_tickets:
+            skipped += 1
+            continue
+
+        for col_idx, col_name in enumerate(TEMPLATE_COLUMNS, start=1):
+            src_cell = ws.cell(row=style_row, column=col_idx)
+            dst_cell = ws.cell(row=next_row, column=col_idx, value=row[col_name])
+            dst_cell.font = copy(src_cell.font)
+            dst_cell.fill = copy(src_cell.fill)
+            dst_cell.alignment = copy(src_cell.alignment)
+            dst_cell.number_format = src_cell.number_format if src_cell.number_format != "General" or not isinstance(row[col_name], pd.Timestamp) else "m/d/yy h:mm"
+
+        next_row += 1
+        added += 1
+
+    wb.save(output_path)
+    return added, skipped
+
+
+def main():
+    if len(sys.argv) != 3:
+        print("Usage: python generate_report.py <raw_export_file> <ticket_tracker_file>")
+        sys.exit(1)
+
+    raw_path = Path(sys.argv[1])
+    tracker_path = Path(sys.argv[2])
+    output_path = tracker_path  # overwrite in place; change if you want a copy instead
+
+    df = load_raw(raw_path)
+    report_df = build_report_rows(df)
+    added, skipped = append_to_tracker(report_df, tracker_path, output_path)
+
+    print(f"Done. Added {added} new ticket(s), skipped {skipped} duplicate(s).")
+    print(f"Report saved to: {output_path}")
+
+
+if __name__ == "__main__":
+    main()
