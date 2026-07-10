@@ -62,6 +62,12 @@ TEMPLATE_COLUMNS = [
     "Reporter", "Assigned To", "Status",
 ]
 
+DATE_COLUMNS = {
+    "Created Time (CEST)", "Acknowledged Time (CEST)", "Resolved Time (CEST)",
+    "Created Time (IST)", "Acknowledged Time (IST)",
+}
+DATE_NUMBER_FORMAT = "dd-mm-yyyy hh:mm"
+
 
 def load_raw(raw_path: Path) -> pd.DataFrame:
     if raw_path.suffix.lower() == ".csv":
@@ -144,7 +150,10 @@ def append_to_tracker(report_df: pd.DataFrame, tracker_path: Path, output_path: 
             dst_cell.font = copy(src_cell.font)
             dst_cell.fill = copy(src_cell.fill)
             dst_cell.alignment = copy(src_cell.alignment)
-            dst_cell.number_format = src_cell.number_format if src_cell.number_format != "General" or not isinstance(row[col_name], pd.Timestamp) else "m/d/yy h:mm"
+            if col_name in DATE_COLUMNS:
+                dst_cell.number_format = DATE_NUMBER_FORMAT
+            else:
+                dst_cell.number_format = src_cell.number_format
 
         next_row += 1
         added += 1
