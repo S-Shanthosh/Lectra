@@ -1,0 +1,105 @@
+function main(workbook: ExcelScript.Workbook) {
+    const selectedSheet = workbook.getActiveWorksheet();
+	selectedSheet.setName("ALB Logs");
+    setTimeout(() => {}, 1000);
+    updateALBSheet(workbook);
+    createPivotTables(workbook);
+}
+
+function updateALBSheet(workbook: ExcelScript.Workbook) {	
+	let sourceSheet = workbook.getWorksheet("ALB Logs");
+    const lastRow = sourceSheet.getUsedRange().getRowCount();
+    const chunkSize = 1000;
+    if (sourceSheet.getRange("A1").getValue() == "type,\"time\",\"elb\",\"client_ip\",\"elb_status_code\",\"request_url\",\"domain_name\"") {
+        for (let startRow = 0; startRow < lastRow; startRow += chunkSize) {
+            let endRow = Math.min(startRow + chunkSize, lastRow);
+            let sourceRange = sourceSheet.getRangeByIndexes(startRow, 0, endRow - startRow, 1);
+            let sourceValues = sourceRange.getValues();
+            let outputValues = sourceValues.map(row => row[0].toString().split(/[,]/).map(val => val.trim().replace(/"/g, '')));
+            const maxLength = Math.max(...outputValues.map(arr => arr.length));
+            outputValues = outputValues.map(row => {
+                while (row.length < maxLength) {
+                    row.push('');
+                }
+                return row;
+            });
+            let destinationRange = sourceSheet.getRangeByIndexes(startRow, 1, outputValues.length, maxLength);
+            destinationRange.setValues(outputValues);
+        }
+		sourceSheet.getRange("A:A").delete(ExcelScript.DeleteShiftDirection.left);
+	}
+	const columnWidths = [40, 102, 127, 80, 80, 330, 180];
+	columnWidths.forEach((width, index) => sourceSheet.getRangeByIndexes(0, index, 1, 1).getFormat().setColumnWidth(width));
+	let headerRange = sourceSheet.getRange("A1:G1");
+	headerRange.getFormat().getFont().setBold(true);
+	headerRange.getFormat().setHorizontalAlignment(ExcelScript.HorizontalAlignment.center);
+	headerRange.getFormat().getFill().setColor("CAEDFB");
+	sourceSheet.getFreezePanes().freezeRows(1);		
+	let lastCol = sourceSheet.getUsedRange().getColumnCount();
+	let range = sourceSheet.getRangeByIndexes(0, 0, lastRow, lastCol);
+	applyBorders(range);
+	range.getFormat().setWrapText(true);
+	sourceSheet.getRange("1:1").getFormat().setRowHeight(30);
+    
+}
+
+function applyBorders(range: ExcelScript.Range) {
+    ["insideHorizontal", "insideVertical", "edgeBottom", "edgeTop", "edgeLeft", "edgeRight"].forEach(border => {
+        range.getFormat().getRangeBorder(ExcelScript.BorderIndex[border]).setStyle(ExcelScript.BorderLineStyle.continuous);
+        range.getFormat().getRangeBorder(ExcelScript.BorderIndex[border]).setColor("000000");
+        range.getFormat().getRangeBorder(ExcelScript.BorderIndex[border]).setWeight(ExcelScript.BorderWeight.thin);
+    });
+}
+
+function createPivotTables(workbook: ExcelScript.Workbook) {
+    if (!workbook.getWorksheet("Domain Name")) {
+        createPivotTable(workbook, "PivotTable1", "Domain Name", "domain_name", 0, 4, 3, 200);
+    }
+    if (!workbook.getWorksheet("Request URL")) {
+        createPivotTable(workbook, "PivotTable2", "Request URL", "request_url", 0, 4, 3, 275);
+    }
+}
+function createPivotTable(workbook: ExcelScript.Workbook, pivotTableName: string, newSheetName: string, hierarchy: string, startRow: number, colIndex: number, colCount: number, columnWidth: number) {
+	let sourceSheet = workbook.getWorksheet("ALB Logs");
+    let rowCount = sourceSheet.getUsedRange().getRowCount();
+    let sourceRange = sourceSheet.getRangeByIndexes(startRow, colIndex, rowCount, colCount);
+    let newSheet = workbook.addWorksheet();
+    let pivotTable = workbook.addPivotTable(pivotTableName, sourceRange, newSheet.getRange("A1:C20"));
+    pivotTable.addDataHierarchy(pivotTable.getHierarchy("elb_status_code")).setSummarizeBy(ExcelScript.AggregationFunction.count);
+    pivotTable.addRowHierarchy(pivotTable.getHierarchy(hierarchy));
+    pivotTable.addColumnHierarchy(pivotTable.getHierarchy("elb_status_code"));
+	
+   	
+    let lastRow = newSheet.getUsedRange().getRowCount();
+    let lastCol = newSheet.getUsedRange().getColumnCount();
+	
+	let newSheet2 = workbook.addWorksheet();
+	let address = newSheet.getCell(0, lastCol - 1).getAddress().split("!")[1];
+    let lastColLetter = address.replace(/\d/g, "");
+    let newSheet_range = `A2:${lastColLetter}${lastRow}`;
+
+    newSheet2.getRange("A2").copyFrom(newSheet.getRange(newSheet_range), ExcelScript.RangeCopyType.all, false, false);
+	newSheet2.getRange("B1").setValue("elb_status_code");
+	newSheet2.getRange("A2").setValue(newSheetName);
+	
+    
+    newSheet2.getFreezePanes().freezeAt(newSheet2.getRange("1:2"));
+    newSheet2.getRange("A:A").getFormat().setColumnWidth(columnWidth);
+	newSheet2.getRange("A1:A2").getFormat().setHorizontalAlignment(ExcelScript.HorizontalAlignment.center);
+	newSheet2.getRange("B:B").getFormat().setColumnWidth(82.5);
+	newSheet2.getRange(`A1:${lastColLetter}1`).copyFrom(newSheet2.getRange("A2"), ExcelScript.RangeCopyType.formats, false, false);
+	newSheet2.getRange(`${lastColLetter}:${lastColLetter}`).getFormat().autofitColumns();
+	
+	let lastRow2 = newSheet2.getUsedRange().getRowCount();
+    let lastCol2 = newSheet2.getUsedRange().getColumnCount();
+    newSheet2.getRangeByIndexes(0, 0, 2, lastCol2).getFormat().setHorizontalAlignment(ExcelScript.HorizontalAlignment.center);
+    newSheet2.getRangeByIndexes(0, 0, 2, lastCol2).getFormat().setIndentLevel(0);
+    let newSheet2Range = newSheet2.getRangeByIndexes(0, 0, lastRow2, lastCol2);
+    applyBorders(newSheet2Range);
+    newSheet2.getRange("A1").getFormat().getFont().setColor("CAEDFB");
+	newSheet2Range.getFormat().setWrapText(true);
+    newSheet2.setName(newSheetName);
+	newSheet.delete();
+    
+}
+
