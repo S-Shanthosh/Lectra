@@ -1,0 +1,105 @@
+function main(workbook: ExcelScript.Workbook) {
+
+    let selectedSheet = workbook.getActiveWorksheet();
+    const lastRow = selectedSheet.getUsedRange().getRowCount();
+
+    let activityText = "Tenant Upgrade Activity";
+    let found = selectedSheet.getUsedRange().getValues().some(row => row.includes(activityText));
+    if (!found) {
+
+        if (selectedSheet.getRange("A1").getValue() != "Issue key") {
+
+            for (let row = 0; row < lastRow; row++) {
+                let cellValue = selectedSheet.getRange("A" + (row + 1)).getValue().toString();
+                let sourceRangeValues = cellValue.split(/[,]/);
+
+                selectedSheet.getRange("B" + (row + 1))
+                    .getResizedRange(0, sourceRangeValues.length - 1)
+                    .setValues([sourceRangeValues]);
+            }
+
+            selectedSheet.getRange("E:E").insert(ExcelScript.InsertShiftDirection.right);
+            selectedSheet.getRange("K:K").moveTo(selectedSheet.getRange("E:E"));
+            selectedSheet.getRange("H:H").moveTo(selectedSheet.getRange("K:K"));
+
+            const del_columns = ["C", "F", "F", "G", "A",];
+            del_columns.forEach((col, index) => {
+                let range = selectedSheet.getRange(`${col}:${col}`);
+                range.delete(ExcelScript.DeleteShiftDirection.left);
+            });
+        }
+
+        const new_columns = ["H", "I", "J", "K", "L"];
+        const columnName = ["Hours Spend", "Day Elapsed", "Request Type", "Reference Document", "Remarks"];
+        const columnFx = ["=(G2-F2)*24", "=ROUND((H2/24),0)"];
+        new_columns.forEach((col, index) => {
+            selectedSheet.getRange(`${col}1`).setValue(columnName[index]);
+            if (col == "H" || col == "I") {
+                selectedSheet.getRange(`${col}2`).setFormula(columnFx[index]);
+                let dataRange = selectedSheet.getRange(`${col}2:${col}${lastRow}`);
+                selectedSheet.getRange(`${col}2`).autoFill(dataRange, ExcelScript.AutoFillType.fillDefault);
+                selectedSheet.getRange(`${col}:${col}`).copyFrom(selectedSheet.getRange(`${col}:${col}`), ExcelScript.RangeCopyType.values, false, false);
+            }
+        });
+
+        const columns = ["B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"];
+        const columnWidths = [225.75, 65.25, 103.5, 86.25, 87.75, 89, 62.25, 62.25, 75, 96.75];
+
+        columns.forEach((col, index) => {
+            let range = selectedSheet.getRange(`${col}:${col}`);
+            range.getFormat().setColumnWidth(columnWidths[index]);
+        });
+
+        let headerRange = selectedSheet.getRange("A1:L1");
+        applyHeader(headerRange, "ffff00");
+        selectedSheet.getFreezePanes().freezeAt(selectedSheet.getRange("1:1"));
+
+        const lastcol = selectedSheet.getUsedRange().getColumnCount();
+        let dataRange = selectedSheet.getRangeByIndexes(0, 0, lastRow, lastcol);
+        applyBorders(dataRange);
+        selectedSheet.getRange("B:B").getFormat().setWrapText(true);
+
+        let header2Range = selectedSheet.getRange(`C${lastRow + 3}:F${lastRow + 3}`);
+        header2Range.merge(false);
+        selectedSheet.getRange(`C${lastRow + 3}`).setValue(activityText);
+        applyHeader(header2Range, "ffff00");
+        applyBorders(header2Range,);
+
+        const new_columns2 = ["C", "D", "E", "F"];
+        const columnName2 = ["Date", "Tenant Name", "Environment", "Version"];
+        new_columns2.forEach((col, index) => {
+            selectedSheet.getRange(`${col}${lastRow + 4}`).setValue(columnName2[index]);
+        });
+        applyHeader(selectedSheet.getRange(`C${lastRow + 4}:F${lastRow + 4}`), "D9D9D9");
+        applyBorders(selectedSheet.getRange(`C${lastRow + 4}:F${lastRow + 4}`));
+
+        selectedSheet.getRangeByIndexes(1, 0, lastRow, lastcol).getSort().apply([{ key: 6, ascending: true }], false, false, ExcelScript.SortOrientation.rows);
+
+    }
+
+    let excelSerial = selectedSheet.getRange("G2:G2").getValue();
+    let jsDate = new Date((excelSerial - 25569) * 86400 * 1000);
+    let month = jsDate.getMonth();
+    let year = jsDate.getFullYear();
+    const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+    let sheetName = "TT" + monthNames[month] + year.toString();
+    selectedSheet.setName(sheetName);
+
+}
+
+function applyHeader(headerRange: ExcelScript.Range, headercolour: string) {
+    headerRange.getFormat().getFill().setColor(headercolour);
+    headerRange.getFormat().getFont().setBold(true);
+    headerRange.getFormat().setVerticalAlignment(ExcelScript.VerticalAlignment.center);
+    headerRange.getFormat().setHorizontalAlignment(ExcelScript.HorizontalAlignment.center);
+    headerRange.getFormat().setRowHeight(21);
+}
+
+function applyBorders(range: ExcelScript.Range) {
+    ["insideHorizontal", "insideVertical", "edgeBottom", "edgeTop", "edgeLeft", "edgeRight"].forEach(border => {
+        range.getFormat().getRangeBorder(ExcelScript.BorderIndex[border]).setStyle(ExcelScript.BorderLineStyle.continuous);
+        range.getFormat().getRangeBorder(ExcelScript.BorderIndex[border]).setColor("000000");
+        range.getFormat().getRangeBorder(ExcelScript.BorderIndex[border]).setWeight(ExcelScript.BorderWeight.thin);
+    });
+}
