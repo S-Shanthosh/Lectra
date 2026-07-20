@@ -1,510 +1,441 @@
-"""
-WAF Report Generator — Python replacement for the Office Script
---------------------------------------------------------------
-USAGE:
-    python waf_report.py
+function main(workbook: ExcelScript.Workbook) {
+    //DailyReport(workbook);
+    CreateRuleSheets(workbook);
+    //GenerateMonthlyReport(workbook);
 
-HOW IT WORKS:
-    Step 1  — DailyReport   : paste your raw WAF log txt into a file called  raw_input.txt
-                               in the same folder, then run the script.
-                               It appends new data into WAF_Report.xlsx (creates it if needed).
-
-    Step 2  — CreateRuleSheets : automatically runs after DailyReport.
-
-    Step 3  — GenerateMonthlyReport : uncomment the call at the bottom when you are ready
-                                       to produce the monthly pivot summary.
-
-REQUIREMENTS:
-    pip install openpyxl
-"""
-
-import re
-import sys
-from collections import defaultdict
-from datetime import datetime, date
-from pathlib import Path
-
-import openpyxl
-from openpyxl import Workbook, load_workbook
-from openpyxl.styles import (
-    Font, PatternFill, Alignment, Border, Side, numbers
-)
-from openpyxl.utils import get_column_letter
-
-# ── file paths ────────────────────────────────────────────────────────────────
-RAW_INPUT_FILE = "raw_input.txt"      # paste your daily raw WAF log here
-OUTPUT_FILE    = "WAF_Report.xlsx"    # created/updated by the script
-
-# ── colours (hex, no #) ───────────────────────────────────────────────────────
-GREEN_HEADER = "70AD47"
-GREEN_PIVOT  = "00B050"
-BLACK        = "000000"
-WHITE        = "FFFFFF"
-
-# ── column widths (pixels → approximate openpyxl units: divide by 7) ─────────
-COL_WIDTHS = {          # openpyxl width units
-    "A": 14.4,          # Date        (≈100.5 px)
-    "B": 24.5,          # Rule Set    (≈171.75 px)
-    "C": 27.5,          # Rule        (≈192.75 px)
-    "D": 25.8,          # URI         (≈180.5 px)
-    "E": 44.1,          # Args        (≈308.75 px)
 }
-HEADERS = ["Date", "Rule Set", "Rule", "URI", "Args"]
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# HELPERS
-# ══════════════════════════════════════════════════════════════════════════════
-
-def thin_border():
-    s = Side(style="thin", color=BLACK)
-    return Border(left=s, right=s, top=s, bottom=s)
-
-
-def apply_borders(ws, min_row, max_row, min_col, max_col):
-    b = thin_border()
-    for row in ws.iter_rows(min_row=min_row, max_row=max_row,
-                             min_col=min_col, max_col=max_col):
-        for cell in row:
-            cell.border = b
-
-
-def style_header_row(ws):
-    """Green header row, bold, centred — matches Style_edit in the script."""
-    fill = PatternFill("solid", fgColor=GREEN_HEADER)
-    font = Font(bold=True, color=BLACK)
-    align = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    b = thin_border()
-    for col_idx, col_letter in enumerate("ABCDE", 1):
-        cell = ws.cell(row=1, column=col_idx)
-        cell.value = HEADERS[col_idx - 1]
-        cell.fill  = fill
-        cell.font  = font
-        cell.alignment = align
-        cell.border = b
-        ws.column_dimensions[col_letter].width = COL_WIDTHS[col_letter]
-    ws.row_dimensions[1].height = 21
-    ws.freeze_panes = "A2"
-
-
-def style_data_rows(ws, start_row=2):
-    """Borders + wrap on all data rows."""
-    b = thin_border()
-    wrap = Alignment(wrap_text=True)
-    for row in ws.iter_rows(min_row=start_row, max_row=ws.max_row,
-                             min_col=1, max_col=5):
-        for cell in row:
-            cell.border    = b
-            cell.alignment = wrap
-
-
-def set_date_format(ws, col=1, start_row=2):
-    """Apply dd/MM/yy hh:mm:ss number format to the date column."""
-    fmt = "DD/MM/YY HH:MM:SS"
-    for row in ws.iter_rows(min_row=start_row, max_row=ws.max_row,
-                             min_col=col, max_col=col):
-        for cell in row:
-            if cell.value is not None:
-                cell.number_format = fmt
-
-
-def sanitise_sheet_name(name: str) -> str:
-    """Remove Excel-illegal chars and cap at 31 characters."""
-    cleaned = re.sub(r"[\[\]*?/\\:]", "", name).strip()
-    return cleaned[:31]
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# STEP 1 — DailyReport  (parse raw_input.txt → ConsolidationSheet)
-# ══════════════════════════════════════════════════════════════════════════════
-
-EXPECTED_HEADER = (
-    "timestamp|terminatingRuleId|action|httpSourceName|httpSourceId|"
-    "ruleGroupId|ruleId|clientIp|country|PLMUsername|Host|uri|args|"
-    "httpVersion|httpMethod"
-)
-# Raw pipe-column indices
-IDX_TS  = 0
-IDX_RG  = 5
-IDX_RI  = 6
-IDX_URI = 11
-IDX_ARG = 12
-
-
-def parse_timestamp(raw: str) -> datetime | None:
-    """'2026-03-30 01:46:38' → datetime object."""
-    raw = raw.strip()
-    try:
-        return datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
-    except ValueError:
-        return None
-
-
-def parse_raw_file(path: str) -> list[tuple]:
-    """
-    Read raw WAF log (pipe-delimited, one row per line).
-    Returns list of (datetime, ruleGroupId, ruleId, uri, args).
-    Expands semicolon-separated rule pairs into separate rows.
-    """
-    rows = []
-    with open(path, encoding="utf-8") as f:
-        lines = [l.rstrip("\r\n") for l in f if l.strip()]
-
-    if not lines:
-        print("ERROR: raw_input.txt is empty.")
-        return rows
-
-    header = lines[0].strip()
-    if header != EXPECTED_HEADER:
-        print(f"WARNING: Unexpected header:\n  {header[:120]}")
-
-    for line in lines[1:]:
-        parts = line.split("|")
-        if len(parts) < 13:
-            continue
-
-        ts_raw = parts[IDX_TS].strip()
-        ts = parse_timestamp(ts_raw)
-        if ts is None:
-            print(f"  Skipping unrecognised timestamp: {ts_raw}")
-            continue
-
-        rg_raw = parts[IDX_RG].strip().replace("AWS#AWS", "AWS")
-        ri_raw = parts[IDX_RI].strip().replace("AWS#AWS", "AWS")
-        uri    = parts[IDX_URI].strip()
-        args   = parts[IDX_ARG].strip() if len(parts) > IDX_ARG else ""
-
-        # Protect against Excel formula injection
-        if uri.startswith("="):  uri  = "'" + uri
-        if args.startswith("="): args = "'" + args
-
-        # Expand semicolon-separated multi-rule rows
-        rg_list = [v.strip() for v in rg_raw.split(";") if v.strip()]
-        ri_list = [v.strip() for v in ri_raw.split(";") if v.strip()]
-        pair_count = max(len(rg_list), len(ri_list), 1)
-
-        for p in range(pair_count):
-            rg = rg_list[p] if p < len(rg_list) else ""
-            ri = (ri_list[p] if p < len(ri_list) else "")[:31]
-            if rg or ri:
-                rows.append((ts, rg, ri, uri, args))
-
-    print(f"  Parsed {len(rows)} data rows from {len(lines)-1} raw lines.")
-    return rows
-
-
-def load_or_create_workbook(path: str) -> Workbook:
-    if Path(path).exists():
-        wb = load_workbook(path)
-        print(f"  Opened existing workbook: {path}")
-    else:
-        wb = Workbook()
-        wb.remove(wb.active)          # remove default Sheet
-        print(f"  Creating new workbook: {path}")
-    return wb
-
-
-def daily_report(raw_path: str = RAW_INPUT_FILE,
-                 out_path: str = OUTPUT_FILE):
-    print("\n=== DailyReport ===")
-    rows = parse_raw_file(raw_path)
-    if not rows:
-        print("  Nothing to process.")
-        return
-
-    wb = load_or_create_workbook(out_path)
-
-    # ── ConsolidationSheet ───────────────────────────────────────────────────
-    if "ConsolidationSheet" not in wb.sheetnames:
-        ws = wb.create_sheet("ConsolidationSheet")
-        style_header_row(ws)
-        print("  Created ConsolidationSheet.")
-    else:
-        ws = wb["ConsolidationSheet"]
-        print(f"  ConsolidationSheet already has {ws.max_row - 1} rows — appending.")
-
-    # Build a set of existing rows for duplicate check (join as string)
-    existing = set()
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        existing.add("|".join(str(c) if c is not None else "" for c in row))
-
-    added = 0
-    for (ts, rg, ri, uri, args) in rows:
-        key = "|".join([str(ts), rg, ri, uri, args if args else ""])
-        if key in existing:
-            continue
-        existing.add(key)
-        ws.append([ts, rg, ri, uri, args if args else None])
-        added += 1
-
-    print(f"  Added {added} new rows to ConsolidationSheet.")
-
-    # Format date column, borders, style
-    set_date_format(ws)
-    style_data_rows(ws)
-    style_header_row(ws)          # re-apply header on top of data rows
-
-    wb.save(out_path)
-    print(f"  Saved → {out_path}")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# STEP 2 — CreateRuleSheets
-# ══════════════════════════════════════════════════════════════════════════════
-
-def create_rule_sheets(out_path: str = OUTPUT_FILE):
-    print("\n=== CreateRuleSheets ===")
-    wb = load_workbook(out_path)
-
-    if "ConsolidationSheet" not in wb.sheetnames:
-        print("  ERROR: ConsolidationSheet not found.")
-        return
-
-    ws_con = wb["ConsolidationSheet"]
-    headers_row = [c.value for c in ws_con[1]]
-    try:
-        rule_idx = headers_row.index("Rule")          # 0-based
-    except ValueError:
-        print("  ERROR: 'Rule' column not found in ConsolidationSheet.")
-        return
-
-    # Read all consolidated data
-    all_rows = list(ws_con.iter_rows(min_row=2, values_only=True))
-
-    # Group by rule
-    rule_groups: dict[str, list] = defaultdict(list)
-    for row in all_rows:
-        raw_rule = row[rule_idx]
-        if not raw_rule:
-            continue
-        sheet_name = sanitise_sheet_name(str(raw_rule))
-        rule_groups[sheet_name].append(row)
-
-    print(f"  Found {len(rule_groups)} unique rules.")
-
-    for sheet_name, data_rows in rule_groups.items():
-        if sheet_name not in wb.sheetnames:
-            ws = wb.create_sheet(sheet_name)
-            style_header_row(ws)
-        else:
-            ws = wb[sheet_name]
-
-        # Existing rows for duplicate check
-        existing = set()
-        for row in ws.iter_rows(min_row=2, values_only=True):
-            existing.add("|".join(str(c) if c is not None else "" for c in row))
-
-        added = 0
-        for row in data_rows:
-            key = "|".join(str(c) if c is not None else "" for c in row)
-            if key in existing:
-                continue
-            existing.add(key)
-            ws.append(list(row))
-            added += 1
-
-        set_date_format(ws)
-        style_data_rows(ws)
-        style_header_row(ws)
-        print(f"  [{sheet_name}] +{added} rows")
-
-    wb.save(out_path)
-    print(f"  Saved → {out_path}")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# STEP 3 — GenerateMonthlyReport  (pivot summary → Consolidation sheet)
-# ══════════════════════════════════════════════════════════════════════════════
-
-def generate_monthly_report(out_path: str = OUTPUT_FILE):
-    """
-    Reads ConsolidationSheet, builds a pivot-style summary table:
-        Rows    = Rule Set > Rule  (grouped, matching the pivot layout)
-        Columns = only days that have data  (no gaps for missing days)
-        Values  = count of hits per rule per day
-    Writes result to a sheet called 'Consolidation'.
-    """
-    print("\n=== GenerateMonthlyReport ===")
-    wb = load_workbook(out_path)
-
-    if "ConsolidationSheet" not in wb.sheetnames:
-        print("  ERROR: ConsolidationSheet not found.")
-        return
-
-    ws_con = wb["ConsolidationSheet"]
-    headers_row = [c.value for c in ws_con[1]]
-    date_idx = 0    # col A = Date
-    rg_idx   = 1    # col B = Rule Set
-    rule_idx = 2    # col C = Rule
-
-    # ── collect all data ─────────────────────────────────────────────────────
-    counts: dict[tuple, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    # counts[(rule_set, rule)][date_str] += 1
-
-    all_dates_seen: set[str] = set()
-    month_name = ""
-    year_2d    = ""
-
-    for row in ws_con.iter_rows(min_row=2, values_only=True):
-        dt_val  = row[date_idx]
-        rg_val  = row[rg_idx]  or ""
-        rule_val= row[rule_idx] or ""
-
-        if dt_val is None:
-            continue
-
-        # dt_val is a datetime object (openpyxl reads Excel datetime cells directly)
-        if isinstance(dt_val, datetime):
-            dt = dt_val
-        elif isinstance(dt_val, (int, float)):
-            # Excel serial fallback
-            from datetime import timedelta
-            dt = datetime(1899, 12, 30) + timedelta(days=dt_val)
-        else:
-            continue
-
-        date_str = dt.strftime("%d/%m/%y")          # e.g. "01/05/26"
-        all_dates_seen.add(date_str)
-
-        if not month_name:
-            month_name = dt.strftime("%B")           # e.g. "May"
-            year_2d    = dt.strftime("%y")
-
-        counts[(rg_val, rule_val)][date_str] += 1
-
-    if not counts:
-        print("  No data found in ConsolidationSheet.")
-        return
-
-    # ── sorted unique dates that actually have data ───────────────────────────
-    sorted_dates = sorted(all_dates_seen,
-                          key=lambda s: datetime.strptime(s, "%d/%m/%y"))
-
-    # ── sorted rule pairs: by rule set then rule ──────────────────────────────
-    # Mimic pivot layout: RuleSet header row, then its child Rules indented
-    rule_sets_ordered = sorted(set(k[0] for k in counts))
-
-    # Build rows: (label, is_ruleset_header, counts_dict)
-    pivot_rows: list[tuple] = []
-    grand_total_by_date: dict[str, int] = defaultdict(int)
-
-    for rs in rule_sets_ordered:
-        rs_totals: dict[str, int] = defaultdict(int)
-        child_rows = []
-
-        for rule in sorted(set(k[1] for k in counts if k[0] == rs)):
-            rule_counts = counts[(rs, rule)]
-            for d, v in rule_counts.items():
-                rs_totals[d] += v
-                grand_total_by_date[d] += v
-            child_rows.append((rule, rule_counts))
-
-        pivot_rows.append((rs, True, dict(rs_totals)))    # rule set header
-        for (rule, rc) in child_rows:
-            pivot_rows.append((rule, False, dict(rc)))    # child rule
-
-    # ── build/replace Consolidation sheet ────────────────────────────────────
-    if "Consolidation" in wb.sheetnames:
-        del wb["Consolidation"]
-    ws2 = wb.create_sheet("Consolidation")
-
-    # Header row: WAF US PRD May | May 1 | May 2 | ... | Grand Total
-    header: list = [f"WAF US PRD {month_name}"]
-    for ds in sorted_dates:
-        day_num = int(ds[:2])
-        header.append(f"{month_name[:3]} {day_num}")
-    header.append("Grand Total")
-
-    # Style header
-    green_fill = PatternFill("solid", fgColor=GREEN_PIVOT)
-    bold_font  = Font(bold=True, color=BLACK)
-    centre     = Alignment(horizontal="center", vertical="center")
-    b          = thin_border()
-
-    for col_idx, val in enumerate(header, 1):
-        cell = ws2.cell(row=1, column=col_idx, value=val)
-        cell.fill      = green_fill
-        cell.font      = bold_font
-        cell.alignment = centre
-        cell.border    = b
-        cell.number_format = "@"    # text
-
-    ws2.row_dimensions[1].height = 26.25
-    ws2.column_dimensions["A"].width = 30.7   # ≈215px
-    ws2.freeze_panes = "A2"
-
-    # ── data rows ─────────────────────────────────────────────────────────────
-    wrap_align = Alignment(wrap_text=True)
-    for (label, is_rs, day_counts) in pivot_rows:
-        row_total = sum(day_counts.values())
-        row_data  = [label]
-        for ds in sorted_dates:
-            v = day_counts.get(ds)
-            row_data.append(v if v else None)
-        row_data.append(row_total if row_total else None)
-
-        row_num = ws2.max_row + 1
-        for col_idx, val in enumerate(row_data, 1):
-            cell = ws2.cell(row=row_num, column=col_idx, value=val)
-            cell.border    = b
-            cell.alignment = wrap_align
-            if is_rs:
-                cell.font = Font(bold=True)
-
-    # Grand Total row (green)
-    gt_row = ["Grand Total"]
-    grand_total = 0
-    for ds in sorted_dates:
-        v = grand_total_by_date.get(ds, 0)
-        gt_row.append(v if v else None)
-        grand_total += v
-    gt_row.append(grand_total if grand_total else None)
-
-    gt_row_num = ws2.max_row + 1
-    for col_idx, val in enumerate(gt_row, 1):
-        cell = ws2.cell(row=gt_row_num, column=col_idx, value=val)
-        cell.fill      = green_fill
-        cell.font      = bold_font
-        cell.alignment = centre
-        cell.border    = b
-
-    # Auto-fit remaining columns (approximate)
-    for col_idx in range(2, len(header) + 1):
-        ws2.column_dimensions[get_column_letter(col_idx)].width = 8
-
-    # ── rename ConsolidationSheet → ConsolidationSheet-old ───────────────────
-    wb["ConsolidationSheet"].title = "ConsolidationSheet-old"
-
-    # ── sheet order: ConsolidationSheet-old at pos 1, Consolidation at pos 2 ─
-    sheet_names = wb.sheetnames
-    sheets = {name: wb[name] for name in sheet_names}
-    ordered = ["ConsolidationSheet-old", "Consolidation"] + \
-              [n for n in sheet_names if n not in ("ConsolidationSheet-old", "Consolidation")]
-    for i, name in enumerate(ordered):
-        wb.move_sheet(name, offset=i - wb.index(wb[name]))
-
-    wb.save(out_path)
-    print(f"  Written Consolidation sheet — {len(sorted_dates)} date columns, "
-          f"{len(pivot_rows)} rule rows.")
-    print(f"  Grand Total: {grand_total} hits")
-    print(f"  Saved → {out_path}")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# MAIN — uncomment what you need
-# ══════════════════════════════════════════════════════════════════════════════
-
-if __name__ == "__main__":
-    # ── Step 1: paste raw WAF log into raw_input.txt, then run ───────────────
-    daily_report()
-
-    # ── Step 2: create individual rule sheets ─────────────────────────────────
-    if Path(OUTPUT_FILE).exists():
-        create_rule_sheets()
-    else:
-        print("\n  Skipping CreateRuleSheets — no output file yet (raw_input.txt was empty).")
-
-    # ── Step 3: generate monthly pivot summary ────────────────────────────────
-    #   Uncomment when all daily data is in ConsolidationSheet
-    # if Path(OUTPUT_FILE).exists():
-    #     generate_monthly_report()
+
+function DailyReport(workbook: ExcelScript.Workbook) {
+    console.log("initiating DailyReport process..");
+    const selectedSheet = workbook.getActiveWorksheet();
+    selectedSheet.setName("source sheet");
+    console.log("initiating source sheet");
+    initiate(workbook);
+    console.log("initiating TransformData");
+    TransformData(workbook);
+    selectedSheet.delete();
+}
+
+function initiate(workbook: ExcelScript.Workbook) {
+    let selectedSheet = workbook.getWorksheet("source sheet");
+    const lastRow = selectedSheet.getUsedRange().getRowCount();
+
+    if (selectedSheet.getRange("A1").getValue() == "timestamp|terminatingRuleId|action|httpSourceName|httpSourceId|ruleGroupId|ruleId|clientIp|country|PLMUsername|Host|uri|args|httpVersion|httpMethod") {
+        for (let row = 0; row < lastRow; row++) {
+            const cellValue = selectedSheet.getCell(row, 0).getValue();
+            const cellText = cellValue !== undefined && cellValue !== null ? String(cellValue) : "";
+            if (!cellText.includes("|")) {
+                continue;
+            } else {
+                const splitValues = cellText.split("|");
+                for (let i = 0; i < splitValues.length; i++) {
+                    let valueToSet = splitValues[i];
+                    if (typeof valueToSet === "string" && valueToSet.startsWith("=")) {
+                        valueToSet = "'" + valueToSet;
+                    }
+                    selectedSheet.getCell(row, i).setValue(valueToSet);
+                }
+            }
+        }
+
+
+        let columnARange = selectedSheet.getRange("A2:A" + selectedSheet.getUsedRange().getRowCount());
+        columnARange.getValues().forEach((row, index) => {
+            let cell = columnARange.getCell(index, 0);
+            cell.setNumberFormat("dd/MM/yy");
+            cell.setValue(row[0]);
+        });
+
+        if (selectedSheet.getRange("B1").getValue() == "terminatingRuleId") {
+            selectedSheet.getRange("B:E").delete(ExcelScript.DeleteShiftDirection.left);
+            selectedSheet.getRange("D:G").delete(ExcelScript.DeleteShiftDirection.left);
+            selectedSheet.getRange("F:G").delete(ExcelScript.DeleteShiftDirection.left);
+        }
+        selectedSheet.replaceAll("AWS#AWS", "AWS", { completeMatch: false, matchCase: false });
+        selectedSheet.replaceAll("; ", ";", { completeMatch: false, matchCase: false });
+        const ins_columns = ["C", "F"];
+        const column_value = ["ruleId", "uri"];
+        const New_column = ["B", "E"];
+
+        ins_columns.forEach((col, index) => {
+            if (selectedSheet.getRange(`${col}1`).getValue() == column_value[index]) {
+                for (let cl = 0; cl < 2; cl++) {
+                    selectedSheet.getRange(`${col}:${col}`).insert(ExcelScript.InsertShiftDirection.right);
+                }
+
+                let dataRange = selectedSheet.getRange(`${New_column[index]}1:${New_column[index]}${lastRow}`);
+                for (let row = 0; row < dataRange.getRowCount(); row++) {
+                    let sourceRange = dataRange;
+                    let destinationRange = selectedSheet.getRange(`${New_column[index]}1`);
+                    let sourceRangeValues = sourceRange.getRow(row).getValues()[0][0].toString().split(/[;]/)
+                    destinationRange.getOffsetRange(row, 0).getResizedRange(0, sourceRangeValues.length - 1).setValues([sourceRangeValues]);
+                }
+            }
+        });
+    }
+    selectedSheet.setPosition(0);
+}
+
+function formatExcelDate(excelDate: number): string {
+    const baseDate = new Date(1899, 11, 30);
+    const wholeDays = Math.floor(excelDate);
+    const fractionalDay = excelDate - wholeDays;
+
+
+    const datePart = new Date(baseDate.getTime() + wholeDays * 24 * 60 * 60 * 1000);
+
+
+    const totalSeconds = Math.round(fractionalDay * 86400);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+
+    const pad = (n: number) => n.toString().padStart(2, '0');
+
+    const day = pad(datePart.getDate());
+    const month = pad(datePart.getMonth() + 1);
+    const year = datePart.getFullYear();
+
+    return `${day}/${month}/${year} ${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+}
+
+
+function TransformData(workbook: ExcelScript.Workbook) {
+    let sourceSheet = workbook.getWorksheet("source sheet");
+    const data = sourceSheet.getUsedRange().getValues();
+
+    let newSheet = workbook.getWorksheet("TempData");
+    if (newSheet) {
+        newSheet.delete();
+    }
+    newSheet = workbook.addWorksheet("TempData");
+    newSheet.getRange("A1:E1").setValues([["date", "ruleGroupId", "ruleId", "uri", "args"]]);
+    let output: (string | undefined)[][] = [];
+
+    for (let i = 1; i < data.length; i++) {
+        const row = data[i];
+        const rawDate = row[0];
+        let uri = row[7] as string;
+        if (typeof uri === "string" && uri.startsWith("=")) {
+            uri = "'" + uri;
+        }
+        let args = row[8] as string;
+        if (typeof args === "string" && args.startsWith("=")) {
+            args = "'" + args;
+        }
+
+        for (let j = 1; j <= 3; j++) {
+            const ruleGroupId = row[j] as string;
+            const ruleId = row[j + 3] as string;
+
+            if (ruleGroupId || ruleId) {
+                output.push([rawDate, ruleGroupId, ruleId, uri, args]);
+            }
+        }
+    }
+
+    if (output.length > 0) {
+        newSheet.getRangeByIndexes(1, 0, output.length, 5).setValues(output);
+    }
+    let columnARange = newSheet.getRange("A2:A" + newSheet.getUsedRange().getRowCount());
+    columnARange.getValues().forEach((row, index) => {
+        let cell = columnARange.getCell(index, 0);
+        cell.setNumberFormat("dd/MM/yy");
+        cell.setValue(row[0]);
+    });
+
+    newSheet.setPosition(1);
+    console.log("initiating ConsolidationSheet");
+    ConsolidationSheet(workbook);
+    newSheet.delete();
+    console.log("DailyReport Completed Sucessfully..");
+}
+
+
+
+
+function ConsolidationSheet(workbook: ExcelScript.Workbook) {
+    let tempSheet = workbook.getWorksheet("TempData");
+    let usedRange = tempSheet.getUsedRange();
+    if (!usedRange) return;
+
+    let values = usedRange.getValues();
+    if (values.length < 2) return;
+
+    let headers = values[0];
+    let dataRows = values.slice(1);
+
+    let targetSheet = workbook.getWorksheet("ConsolidationSheet");
+    if (!targetSheet) {
+        targetSheet = workbook.addWorksheet("ConsolidationSheet");
+        targetSheet.getRangeByIndexes(0, 0, 1, headers.length).setValues([headers]);
+    }
+
+    // Read existing sheet once
+    let existingRange = targetSheet.getUsedRange();
+    let existingData = existingRange ? existingRange.getValues() : [];
+
+    // Fast duplicate lookup
+    let existingSet = new Set<string>();
+    for (let i = 1; i < existingData.length; i++) {
+        existingSet.add(existingData[i].join("|"));
+    }
+
+    // Collect new rows
+    let rowsToAppend: (string | number | boolean)[][] = [];
+
+    for (const row of dataRows) {
+        let sanitizedRow = row.map(cell => {
+            if (typeof cell === "string" && cell.startsWith("=")) {
+                return "'" + cell;
+            }
+            return cell;
+        });
+
+        const key = sanitizedRow.join("|");
+
+        if (!existingSet.has(key)) {
+            existingSet.add(key);
+            rowsToAppend.push(sanitizedRow.slice(0, headers.length));
+        }
+    }
+
+    // Bulk write once
+    if (rowsToAppend.length > 0) {
+        const startRow = existingData.length;
+        targetSheet
+            .getRangeByIndexes(startRow, 0, rowsToAppend.length, headers.length)
+            .setValues(rowsToAppend);
+    }
+
+    // Apply date format in one call
+    const lastRow = targetSheet.getUsedRange().getRowCount();
+    if (lastRow > 1) {
+        targetSheet.getRange(`A2:A${lastRow}`).setNumberFormat("dd/MM/yy hh:mm:ss");
+    }
+
+    Style_edit(workbook, targetSheet);
+}
+
+
+function Style_edit(workbook: ExcelScript.Workbook, selectedSheet: ExcelScript.Worksheet) {
+
+    const columns = ["A", "B", "C", "D", "E"];
+    const column_value = ["Date", "Rule Set", "Rule", "URI", "Args"];
+    const columnWidths = [100.5, 171.75, 192.75, 180.5, 308.75];
+    columns.forEach((col, index) => {
+        selectedSheet.getRange(`${col}1`).setValue(column_value[index]);
+        selectedSheet.getRange(`${col}:${col}`).getFormat().setColumnWidth(columnWidths[index]);
+    });
+
+    let headerRange = selectedSheet.getRange("A1:E1");
+    headerRange.getFormat().getFill().setColor("70AD47");
+    headerRange.getFormat().getFont().setBold(true);
+    headerRange.getFormat().setVerticalAlignment(ExcelScript.VerticalAlignment.center);
+    headerRange.getFormat().setHorizontalAlignment(ExcelScript.HorizontalAlignment.center);
+    headerRange.getFormat().setRowHeight(21);
+    selectedSheet.getFreezePanes().freezeAt(selectedSheet.getRange("1:1"));
+
+    let lastRow = selectedSheet.getUsedRange().getRowCount();
+    let lastCol = selectedSheet.getUsedRange().getColumnCount();
+    let range = selectedSheet.getRangeByIndexes(0, 0, lastRow, lastCol);
+    applyBorders(range);
+    range.getFormat().setWrapText(true);
+}
+
+function applyBorders(range: ExcelScript.Range) {
+    ["insideHorizontal", "insideVertical", "edgeBottom", "edgeTop", "edgeLeft", "edgeRight"].forEach(border => {
+        range.getFormat().getRangeBorder(ExcelScript.BorderIndex[border]).setStyle(ExcelScript.BorderLineStyle.continuous);
+        range.getFormat().getRangeBorder(ExcelScript.BorderIndex[border]).setColor("000000");
+        range.getFormat().getRangeBorder(ExcelScript.BorderIndex[border]).setWeight(ExcelScript.BorderWeight.thin);
+    });
+}
+
+function CreateRuleSheets(workbook: ExcelScript.Workbook) {
+    console.log("initiating CreateRuleSheets process..");
+    let usedRange = workbook.getWorksheet("ConsolidationSheet").getUsedRange();
+    if (!usedRange) return;
+
+    let values = usedRange.getValues();
+    if (values.length < 2) return;
+
+    let headers = values[0];
+    let dataRows = values.slice(1);
+    const ruleIdIndex = headers.indexOf("Rule");
+    dataRows.forEach(row => {
+        let rawRuleId = row[ruleIdIndex] as string;
+        if (!rawRuleId) return;
+
+        let ruleId = rawRuleId.trim().replace(/[\[\]\*\?\/\\:]/g, "").slice(0, 31);
+
+        let targetSheet = workbook.getWorksheet(ruleId);
+        if (!targetSheet) {
+            targetSheet = workbook.addWorksheet(ruleId);
+            targetSheet.getRangeByIndexes(0, 0, 1, headers.length).setValues([headers]);
+        }
+
+        let existingDataRange = targetSheet.getUsedRange();
+        let existingData = existingDataRange ? existingDataRange.getValues().slice(1) : [];
+
+        let isDuplicate = existingData.some(existingRow =>
+            existingRow.join("|") === row.join("|")
+        );
+        if (isDuplicate) return;
+
+        let sanitizedRow = row.map(cell => {
+            if (typeof cell === "string" && cell.startsWith("=")) {
+                return "'" + cell;
+            }
+            return cell;
+        });
+
+        let nextRowIndex = existingData.length + 1;
+        targetSheet.getRangeByIndexes(nextRowIndex, 0, 1, headers.length).setValues([sanitizedRow.slice(0, headers.length)]);
+
+
+    });
+    console.log("initiating style for RuleSheets..");
+    const sheets = workbook.getWorksheets();
+    for (let sheet of sheets) {
+        if (sheet.getName() !== "ConsolidationSheet") {
+            let columnARange = sheet.getRange("A2:A" + sheet.getUsedRange().getRowCount());
+            columnARange.getValues().forEach((row, index) => {
+                let cell = columnARange.getCell(index, 0);
+                cell.setNumberFormat("dd/MM/yy hh:mm:ss");
+                cell.setValue(row[0]);
+            });
+            Style_edit(workbook, sheet);
+        }
+    }
+    console.log("CreateRuleSheets Created Sucessfully..");
+}
+
+function GenerateMonthlyReport(workbook: ExcelScript.Workbook) {
+    console.log("initiating GenerateMonthlyReport process..");
+    let selectedSheet = workbook.getWorksheet("ConsolidationSheet");
+    let newSheet = selectedSheet.copy(ExcelScript.WorksheetPositionType.before, selectedSheet);
+
+    const usedRange = newSheet.getUsedRange();
+    const values = usedRange.getValues();
+
+    for (let i = 1; i < values.length; i++) {
+        let dateStr = values[i][0] as number;
+        //console.log(dateStr);
+        const date = new Date(Math.round((dateStr - 25569) * 86400 * 1000));
+        const dd = String(date.getUTCDate()).padStart(2, '0');
+        const mm = String(date.getUTCMonth() + 1).padStart(2, '0');
+        const yy = String(date.getUTCFullYear()).slice(-2);
+        //console.log(`${dd}/${mm}/${yy}`);
+
+        let cell = usedRange.getCell(i, 0);
+        cell.setNumberFormat("@");
+        cell.setValue(`${dd}/${mm}/${yy}`);
+    }
+
+    newSheet.setName("ConsolidationSheet-new");
+    console.log("initiating createPivotTable process..");
+    createPivotTable(workbook, newSheet, 0, 0, 3, 200);
+    newSheet.delete();
+    selectedSheet.setName("ConsolidationSheet-old");
+    console.log("MonthlyReport Generated Sucessfully..");
+
+}
+
+function createPivotTable(workbook: ExcelScript.Workbook, sourceSheet: ExcelScript.Worksheet, startRow: number, colIndex: number, colCount: number, columnWidth: number) {
+    let rowCount = sourceSheet.getUsedRange().getRowCount();
+    //console.log(`rowcount: ${rowCount}`);
+    let sourceRange = sourceSheet.getRangeByIndexes(startRow, colIndex, rowCount, colCount);
+    let newSheet = workbook.addWorksheet();
+    let pivotTable = workbook.addPivotTable("PivotTable1", sourceRange, newSheet.getRange("A1:C20"));
+    pivotTable.addRowHierarchy(pivotTable.getHierarchy("Rule Set"));
+    pivotTable.getRowHierarchy("Rule Set").setPosition(0);
+    pivotTable.addRowHierarchy(pivotTable.getHierarchy("Rule"));
+    pivotTable.getRowHierarchy("Rule").setPosition(1);
+    pivotTable.addColumnHierarchy(pivotTable.getHierarchy("Date"));
+    pivotTable.getColumnHierarchy("Date").setPosition(0);
+    pivotTable.addDataHierarchy(pivotTable.getHierarchy("Rule"));
+    pivotTable.getDataHierarchy("Count of Rule").setPosition(0);
+    pivotTable.getLayout().setLayoutType(ExcelScript.PivotLayoutType.compact);
+
+    let pivotRange = newSheet.getUsedRange();
+    pivotRange.getFormat().getFill().setColor("white");
+    pivotRange.getFormat().getFont().setBold(false);
+    pivotRange.getFormat().getFont().setColor("black");
+
+
+    let lastRow = newSheet.getUsedRange().getRowCount();
+    let lastCol = newSheet.getUsedRange().getColumnCount();
+    let newSheetRange = newSheet.getRangeByIndexes(0, 0, lastRow, lastCol);
+
+    newSheet.getRange(`${lastRow}:${lastRow}`).getFormat().getFill().setColor("00B050");
+    applyBorders(newSheetRange);
+    newSheet.setName("Consolidationtable");
+    newSheet.setPosition(1);
+
+    let newSheet2 = workbook.addWorksheet();
+    setHeaderRow();
+
+    function setHeaderRow() {
+        console.log("initiating style for PivotTable..");
+        //console.log(`lastCol: ${lastCol}`);
+        let address = newSheet.getCell(0, lastCol - 2).getAddress().split("!")[1];
+        let lastColLetter = address.replace(/\d/g, "");
+        //console.log(`lastColLetter: ${lastColLetter}`);			
+        let excelSerial = newSheet.getRange(`${lastColLetter}2`).getValue();
+        //console.log(excelSerial);
+        let [day, months, years] = excelSerial.split("/");
+
+        let lastday = parseInt(day, 10);
+        let month = parseInt(months, 10);
+        let year = parseInt(years, 10);
+        //console.log(lastday, month, year);
+
+
+
+        const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+        const monthName = monthNames[month - 1];
+        //console.log(monthNames);
+        //console.log(monthName[1]);
+        //console.log(monthName);
+        const daysInMonth = new Date(year, month + 1, 0).getDate();
+
+        let header: (string | number | boolean)[] = [];
+        header.push(`WAF US PRD ${monthName}`);
+
+        for (let day = 1; day <= lastday; day++) {
+            header.push(`'${monthName.slice(0, 3)} ${day}`);
+        }
+        header.push("Grand Total");
+
+        newSheet2.getRange("A1").getResizedRange(0, header.length - 1).setValues([header]);
+        newSheet2.getRange("A1").getResizedRange(0, header.length - 1).setNumberFormat("@");
+        let _lastRow = newSheet2.getUsedRange().getRowCount();
+        let _lastCol = newSheet2.getUsedRange().getColumnCount();
+        let range = newSheet2.getRangeByIndexes(0, 0, _lastRow, _lastCol);
+        applyBorders(range);
+        range.getFormat().getFill().setColor("00B050");
+        range.getFormat().autofitColumns();
+
+
+        newSheet2.getRange("1:1").getFormat().setRowHeight(26.25);
+        newSheet2.getRange("A:A").getFormat().setColumnWidth(215);
+        newSheet2.getRange("1:1").getFormat().setHorizontalAlignment(ExcelScript.HorizontalAlignment.center);
+        newSheet2.getRange("1:1").getFormat().getFont().setBold(true);
+        newSheet2.getFreezePanes().freezeAt(newSheet2.getRange("1:1"));
+
+
+    }
+
+
+    let address = newSheet.getCell(0, lastCol - 1).getAddress().split("!")[1];
+    let lastColLetter = address.replace(/\d/g, "");
+    let consolidation_range = `A3:${lastColLetter}${lastRow}`;
+
+    newSheet2.getRange("A2").copyFrom(newSheet.getRange(consolidation_range), ExcelScript.RangeCopyType.all, false, false);
+    newSheet2.setName("Consolidation");
+    workbook.getWorksheet("ConsolidationSheet").setPosition(1);
+    newSheet2.setPosition(2);
+    newSheet.delete();
+    console.log("PivotTable Generated Sucessfully..");
+
+}
