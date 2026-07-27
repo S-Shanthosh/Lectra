@@ -98,7 +98,7 @@ def style_new_rows(ws, from_row: int):
     if from_row > ws.max_row:
         return
     b    = thin_border()
-    wrap = Alignment(wrap_text=True)
+    wrap = Alignment(wrap_text=True, vertical="bottom")
     fmt  = "DD/MM/YY HH:MM:SS"
     for row in ws.iter_rows(min_row=from_row, max_row=ws.max_row,
                              min_col=1, max_col=5):
