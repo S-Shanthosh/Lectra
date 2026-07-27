@@ -107,6 +107,10 @@ def style_new_rows(ws, from_row: int):
             cell.alignment = wrap
             if cell.column == 1 and cell.value is not None:
                 cell.number_format = fmt
+    
+    # Auto-fit row heights on Excel open
+    for row_num in range(from_row, ws.max_row + 1):
+        ws.row_dimensions[row_num].height = None
 
 
 def sanitise_sheet_name(name: str) -> str:
