@@ -1,0 +1,879 @@
+function main(workbook: ExcelScript.Workbook) {
+
+  // ============================================================
+  // CONFIGURATION
+  // ============================================================
+
+  const RAW_SHEET_NAME = "RawData";
+  const REPORT_SHEET_NAME = "TicketTrackerReport";
+
+  const REPORT_HEADERS = [
+    "Ticket No",
+    "Ticket Details",
+    "Jira",
+    "Created Time (IST)",
+    "Acknowledged Time (IST)",
+    "Resolved Time (IST)",
+    "Reporter",
+    "Assigned To",
+    "Status"
+  ];
+
+  const JIRA_BASE_URL =
+    "https://lectragroup.atlassian.net/browse/";
+
+  // ============================================================
+  // GET RAW SHEET
+  // ============================================================
+
+  const rawSheet = workbook.getWorksheet(RAW_SHEET_NAME);
+
+  if (!rawSheet) {
+    throw new Error(
+      `Sheet "${RAW_SHEET_NAME}" was not found.\n\n` +
+      `Create a sheet named "${RAW_SHEET_NAME}" and paste the raw JIRA export there.`
+    );
+  }
+
+  const rawUsedRange = rawSheet.getUsedRange(true);
+
+  if (!rawUsedRange) {
+    throw new Error("RawData sheet is empty.");
+  }
+
+  const rawValues = rawUsedRange.getValues();
+
+  if (rawValues.length < 2) {
+    throw new Error("RawData does not contain any ticket rows.");
+  }
+
+  // ============================================================
+  // FIND RAW JIRA COLUMNS
+  // ============================================================
+
+  const rawHeaders = rawValues[0].map(v =>
+    String(v ?? "").trim()
+  );
+
+  const issueKeyIndex = findHeader(rawHeaders, "Issue key");
+  const summaryIndex = findHeader(rawHeaders, "Summary");
+  const createdIndex = findHeader(rawHeaders, "Created");
+  const reporterIndex = findHeader(rawHeaders, "Reporter");
+  const assigneeIndex = findHeader(rawHeaders, "Assignee");
+  const statusIndex = findHeader(rawHeaders, "Status");
+  const resolvedIndex = findHeader(rawHeaders, "Resolved");
+
+  if (issueKeyIndex === -1) {
+    throw new Error('Could not find "Issue key" column in RawData.');
+  }
+
+  if (summaryIndex === -1) {
+    throw new Error('Could not find "Summary" column in RawData.');
+  }
+
+  if (createdIndex === -1) {
+    throw new Error('Could not find "Created" column in RawData.');
+  }
+
+  if (reporterIndex === -1) {
+    throw new Error('Could not find "Reporter" column in RawData.');
+  }
+
+  if (assigneeIndex === -1) {
+    throw new Error('Could not find "Assignee" column in RawData.');
+  }
+
+  if (statusIndex === -1) {
+    throw new Error('Could not find "Status" column in RawData.');
+  }
+
+  if (resolvedIndex === -1) {
+    throw new Error('Could not find "Resolved" column in RawData.');
+  }
+
+  // ============================================================
+  // GET / CREATE REPORT SHEET
+  // ============================================================
+
+  let reportSheet = workbook.getWorksheet(REPORT_SHEET_NAME);
+
+  if (!reportSheet) {
+    reportSheet = workbook.addWorksheet(REPORT_SHEET_NAME);
+
+    reportSheet
+      .getRangeByIndexes(0, 0, 1, REPORT_HEADERS.length)
+      .setValues([REPORT_HEADERS]);
+
+    formatReportHeader(reportSheet);
+  }
+
+  // ============================================================
+  // ENSURE REPORT HEADER IS CORRECT
+  // ============================================================
+
+  reportSheet
+    .getRangeByIndexes(0, 0, 1, REPORT_HEADERS.length)
+    .setValues([REPORT_HEADERS]);
+
+  // ============================================================
+  // READ EXISTING REPORT
+  // ============================================================
+
+  const reportUsedRange = reportSheet.getUsedRange(true);
+
+  let existingValues: (string | number | boolean)[][] = [];
+
+  if (reportUsedRange) {
+    existingValues = reportUsedRange.getValues();
+  }
+
+  // Ticket numbers already in the report
+  const existingTickets = new Set<string>();
+
+  // Existing rows indexed by ticket number.
+  // This is useful if acknowledgement was manually entered.
+  const existingRows = new Map<
+    string,
+    number
+  >();
+
+  if (existingValues.length > 1) {
+
+    for (let i = 1; i < existingValues.length; i++) {
+
+      const ticket = String(
+        existingValues[i][0] ?? ""
+      ).trim();
+
+      if (!ticket) {
+        continue;
+      }
+
+      existingTickets.add(ticket);
+      existingRows.set(ticket, i);
+    }
+  }
+
+  // ============================================================
+  // PROCESS RAW DATA
+  // ============================================================
+
+  const newTickets: {
+    ticket: string;
+    summary: string;
+    created: string;
+    reporter: string;
+    assignee: string;
+    status: string;
+    resolved: string;
+  }[] = [];
+
+  for (let i = 1; i < rawValues.length; i++) {
+
+    const row = rawValues[i];
+
+    const ticket = cleanText(row[issueKeyIndex]);
+
+    if (!ticket) {
+      continue;
+    }
+
+    // ----------------------------------------------------------
+    // IDEMPOTENCY
+    // ----------------------------------------------------------
+    // If ticket already exists in report:
+    // DO NOTHING.
+    //
+    // This protects manually entered acknowledgement times,
+    // formatting, comments, etc.
+    // ----------------------------------------------------------
+
+    if (existingTickets.has(ticket)) {
+      continue;
+    }
+
+    const summary = cleanText(row[summaryIndex]);
+
+    const created = formatJiraDate(
+      row[createdIndex]
+    );
+
+    const reporter = cleanText(
+      row[reporterIndex]
+    );
+
+    const assignee = cleanText(
+      row[assigneeIndex]
+    );
+
+    const status = cleanText(
+      row[statusIndex]
+    );
+
+    const resolved = formatJiraDate(
+      row[resolvedIndex]
+    );
+
+    newTickets.push({
+      ticket,
+      summary,
+      created,
+      reporter,
+      assignee,
+      status,
+      resolved
+    });
+
+    // Add immediately so duplicates inside the SAME raw file
+    // are also prevented.
+    existingTickets.add(ticket);
+  }
+
+  // ============================================================
+  // NOTHING NEW
+  // ============================================================
+
+  if (newTickets.length === 0) {
+
+    console.log(
+      "No new tickets found. Existing report was not modified."
+    );
+
+    return;
+  }
+
+  // ============================================================
+  // FIND NEXT REPORT ROW
+  // ============================================================
+
+  const currentUsedRange = reportSheet.getUsedRange(true);
+
+  let nextRow = 1;
+
+  if (currentUsedRange) {
+    nextRow = currentUsedRange.getRowCount();
+  }
+
+  // ============================================================
+  // WRITE NEW ROWS
+  // ============================================================
+
+  const outputValues: string[][] = [];
+
+  for (const ticket of newTickets) {
+
+    outputValues.push([
+      ticket.ticket,
+      ticket.summary,
+      "",                    // Jira - hyperlink added separately
+      ticket.created,
+      "",                    // Acknowledged - intentionally blank
+      ticket.resolved,
+      ticket.reporter,
+      ticket.assignee,
+      ticket.status
+    ]);
+  }
+
+  const outputRange = reportSheet.getRangeByIndexes(
+    nextRow,
+    0,
+    outputValues.length,
+    REPORT_HEADERS.length
+  );
+
+  outputRange.setValues(outputValues);
+
+  // ============================================================
+  // CREATE REAL JIRA HYPERLINKS
+  // ============================================================
+  //
+  // IMPORTANT:
+  // We DO NOT use:
+  //
+  // =HYPERLINK(...)
+  //
+  // This avoids the SharePoint Excel apostrophe issue.
+  //
+  // Office Scripts native hyperlink:
+  // setHyperlink()
+  // ============================================================
+
+  for (let i = 0; i < newTickets.length; i++) {
+
+    const rowIndex = nextRow + i;
+
+    const ticket = newTickets[i].ticket;
+
+    const jiraCell = reportSheet.getCell(
+      rowIndex,
+      2
+    );
+
+    jiraCell.setHyperlink({
+      address: JIRA_BASE_URL + ticket,
+      textToDisplay: ticket,
+      screenTip: "Open " + ticket
+    });
+
+    // Make hyperlink look like a normal Excel hyperlink
+    jiraCell.getFormat().getFont().setUnderline(
+      ExcelScript.RangeUnderlineStyle.single
+    );
+  }
+
+  // ============================================================
+  // FORMAT DATE COLUMNS
+  // ============================================================
+
+  const firstNewRow = nextRow;
+  const lastNewRow = nextRow + newTickets.length - 1;
+
+  // Created
+  reportSheet
+    .getRangeByIndexes(
+      firstNewRow,
+      3,
+      newTickets.length,
+      1
+    )
+    .setNumberFormat("d/m/yy h:mm AM/PM");
+
+  // Acknowledged
+  reportSheet
+    .getRangeByIndexes(
+      firstNewRow,
+      4,
+      newTickets.length,
+      1
+    )
+    .setNumberFormat("d/m/yy h:mm AM/PM");
+
+  // Resolved
+  reportSheet
+    .getRangeByIndexes(
+      firstNewRow,
+      5,
+      newTickets.length,
+      1
+    )
+    .setNumberFormat("d/m/yy h:mm AM/PM");
+
+  // ============================================================
+  // FORMAT NEW DATA
+  // ============================================================
+
+  const newRange = reportSheet.getRangeByIndexes(
+    firstNewRow,
+    0,
+    newTickets.length,
+    REPORT_HEADERS.length
+  );
+
+  newRange.getFormat().setWrapText(true);
+
+  newRange.getFormat().setVerticalAlignment(
+    ExcelScript.VerticalAlignment.center
+  );
+
+  // ============================================================
+  // APPLY BORDERS TO ENTIRE REPORT
+  // ============================================================
+
+  const finalRange = reportSheet.getUsedRange(true);
+
+  if (finalRange) {
+    applyBorders(finalRange);
+  }
+
+  // ============================================================
+  // COLUMN WIDTHS
+  // ============================================================
+
+  setColumnWidths(reportSheet);
+
+  // ============================================================
+  // FREEZE HEADER
+  // ============================================================
+
+  reportSheet
+    .getFreezePanes()
+    .freezeRows(1);
+
+  // ============================================================
+  // FINAL LOG
+  // ============================================================
+
+  console.log(
+    `Completed. ${newTickets.length} new ticket(s) added.`
+  );
+}
+
+
+// ================================================================
+// FIND HEADER
+// ================================================================
+
+function findHeader(
+  headers: string[],
+  name: string
+): number {
+
+  const wanted = name.toLowerCase().trim();
+
+  return headers.findIndex(
+    h => h.toLowerCase().trim() === wanted
+  );
+}
+
+
+// ================================================================
+// CLEAN TEXT
+// ================================================================
+
+function cleanText(
+  value: string | number | boolean | undefined
+): string {
+
+  if (
+    value === undefined ||
+    value === null
+  ) {
+    return "";
+  }
+
+  return String(value).trim();
+}
+
+
+// ================================================================
+// DATE FORMATTER
+// ================================================================
+//
+// Converts common JIRA/Excel date formats into:
+//
+// d/M/yy h:mm AM/PM
+//
+// Examples:
+//
+// 04/Aug/26 5:49 PM
+// 7/28/2026 6:52
+// August 11, 2026 at 6:01 AM
+// Excel serial numbers
+// ================================================================
+
+function formatJiraDate(
+  value: string | number | boolean | undefined
+): string {
+
+  if (
+    value === undefined ||
+    value === null ||
+    value === ""
+  ) {
+    return "";
+  }
+
+  // ------------------------------------------------------------
+  // Excel serial date
+  // ------------------------------------------------------------
+
+  if (typeof value === "number") {
+
+    const excelEpoch = new Date(
+      Date.UTC(1899, 11, 30)
+    );
+
+    const date = new Date(
+      excelEpoch.getTime() +
+      value * 86400000
+    );
+
+    return formatDateObject(date);
+  }
+
+  let text = String(value).trim();
+
+  if (!text) {
+    return "";
+  }
+
+  // ------------------------------------------------------------
+  // Remove JIRA-style "at"
+  // ------------------------------------------------------------
+
+  text = text.replace(
+    /\s+at\s+/i,
+    " "
+  );
+
+  // ------------------------------------------------------------
+  // Try normal JavaScript parsing
+  // ------------------------------------------------------------
+
+  let date = new Date(text);
+
+  if (!isNaN(date.getTime())) {
+    return formatDateObject(date);
+  }
+
+  // ------------------------------------------------------------
+  // Handle:
+  //
+  // 04/Aug/26 5:49 PM
+  // ------------------------------------------------------------
+
+  const jiraMatch = text.match(
+    /^(\d{1,2})\/([A-Za-z]{3})\/(\d{2,4})\s+(.+)$/i
+  );
+
+  if (jiraMatch) {
+
+    const day = Number(jiraMatch[1]);
+    const monthName = jiraMatch[2];
+    let year = Number(jiraMatch[3]);
+    const time = jiraMatch[4];
+
+    if (year < 100) {
+      year += 2000;
+    }
+
+    const month = monthNameToNumber(
+      monthName
+    );
+
+    if (month >= 0) {
+
+      const parsed = parseTime(
+        time
+      );
+
+      if (parsed) {
+
+        const result = new Date(
+          year,
+          month,
+          day,
+          parsed.hours,
+          parsed.minutes
+        );
+
+        return formatDateObject(result);
+      }
+    }
+  }
+
+  // ------------------------------------------------------------
+  // Handle:
+  //
+  // 7/28/2026 6:52
+  // ------------------------------------------------------------
+
+  const numericMatch = text.match(
+    /^(\d{1,2})\/(\d{1,2})\/(\d{2,4})\s+(\d{1,2}):(\d{2})(?:\s*(AM|PM))?$/i
+  );
+
+  if (numericMatch) {
+
+    const dayOrMonth1 = Number(
+      numericMatch[1]
+    );
+
+    const dayOrMonth2 = Number(
+      numericMatch[2]
+    );
+
+    let year = Number(
+      numericMatch[3]
+    );
+
+    if (year < 100) {
+      year += 2000;
+    }
+
+    let hours = Number(
+      numericMatch[4]
+    );
+
+    const minutes = Number(
+      numericMatch[5]
+    );
+
+    const ampm = numericMatch[6];
+
+    // Assume MM/DD/YYYY for numeric JIRA export
+    const month = dayOrMonth1 - 1;
+    const day = dayOrMonth2;
+
+    if (ampm) {
+
+      if (
+        ampm.toUpperCase() === "PM" &&
+        hours < 12
+      ) {
+        hours += 12;
+      }
+
+      if (
+        ampm.toUpperCase() === "AM" &&
+        hours === 12
+      ) {
+        hours = 0;
+      }
+    }
+
+    const result = new Date(
+      year,
+      month,
+      day,
+      hours,
+      minutes
+    );
+
+    return formatDateObject(result);
+  }
+
+  // ------------------------------------------------------------
+  // If Excel/JIRA gives something we don't understand,
+  // preserve the original value rather than destroying data.
+  // ------------------------------------------------------------
+
+  return text;
+}
+
+
+// ================================================================
+// FORMAT DATE OBJECT
+// ================================================================
+
+function formatDateObject(
+  date: Date
+): string {
+
+  if (isNaN(date.getTime())) {
+    return "";
+  }
+
+  const day = date.getDate();
+
+  const month =
+    date.getMonth() + 1;
+
+  const year =
+    String(date.getFullYear()).slice(-2);
+
+  let hours =
+    date.getHours();
+
+  const minutes =
+    date.getMinutes();
+
+  const ampm =
+    hours >= 12 ? "PM" : "AM";
+
+  hours =
+    hours % 12;
+
+  if (hours === 0) {
+    hours = 12;
+  }
+
+  return (
+    `${day}/${month}/${year} ` +
+    `${hours}:${String(minutes).padStart(2, "0")} ${ampm}`
+  );
+}
+
+
+// ================================================================
+// MONTH NAME
+// ================================================================
+
+function monthNameToNumber(
+  month: string
+): number {
+
+  const months = [
+    "jan",
+    "feb",
+    "mar",
+    "apr",
+    "may",
+    "jun",
+    "jul",
+    "aug",
+    "sep",
+    "oct",
+    "nov",
+    "dec"
+  ];
+
+  return months.indexOf(
+    month.toLowerCase()
+  );
+}
+
+
+// ================================================================
+// TIME PARSER
+// ================================================================
+
+function parseTime(
+  time: string
+): {
+  hours: number;
+  minutes: number;
+} | null {
+
+  const match = time.match(
+    /^(\d{1,2}):(\d{2})(?:\s*(AM|PM))?$/i
+  );
+
+  if (!match) {
+    return null;
+  }
+
+  let hours = Number(match[1]);
+
+  const minutes = Number(match[2]);
+
+  const ampm = match[3];
+
+  if (ampm) {
+
+    if (
+      ampm.toUpperCase() === "PM" &&
+      hours < 12
+    ) {
+      hours += 12;
+    }
+
+    if (
+      ampm.toUpperCase() === "AM" &&
+      hours === 12
+    ) {
+      hours = 0;
+    }
+  }
+
+  return {
+    hours,
+    minutes
+  };
+}
+
+
+// ================================================================
+// HEADER FORMAT
+// ================================================================
+
+function formatReportHeader(
+  sheet: ExcelScript.Worksheet
+) {
+
+  const header =
+    sheet.getRangeByIndexes(
+      0,
+      0,
+      1,
+      9
+    );
+
+  header
+    .getFormat()
+    .getFont()
+    .setBold(true);
+
+  header
+    .getFormat()
+    .setHorizontalAlignment(
+      ExcelScript.HorizontalAlignment.center
+    );
+
+  header
+    .getFormat()
+    .setVerticalAlignment(
+      ExcelScript.VerticalAlignment.center
+    );
+
+  header
+    .getFormat()
+    .setWrapText(true);
+
+  header
+    .getFormat()
+    .setRowHeight(30);
+
+  applyBorders(header);
+}
+
+
+// ================================================================
+// BORDERS
+// ================================================================
+
+function applyBorders(
+  range: ExcelScript.Range
+) {
+
+  const borders = [
+    ExcelScript.BorderIndex.insideHorizontal,
+    ExcelScript.BorderIndex.insideVertical,
+    ExcelScript.BorderIndex.edgeBottom,
+    ExcelScript.BorderIndex.edgeTop,
+    ExcelScript.BorderIndex.edgeLeft,
+    ExcelScript.BorderIndex.edgeRight
+  ];
+
+  for (const borderIndex of borders) {
+
+    const border =
+      range
+        .getFormat()
+        .getRangeBorder(borderIndex);
+
+    border.setStyle(
+      ExcelScript.BorderLineStyle.continuous
+    );
+
+    border.setWeight(
+      ExcelScript.BorderWeight.thin
+    );
+  }
+}
+
+
+// ================================================================
+// COLUMN WIDTHS
+// ================================================================
+
+function setColumnWidths(
+  sheet: ExcelScript.Worksheet
+) {
+
+  const widths = [
+    95,   // Ticket No
+    420,  // Ticket Details
+    105,  // Jira
+    145,  // Created
+    170,  // Acknowledged
+    145,  // Resolved
+    130,  // Reporter
+    140,  // Assigned To
+    100   // Status
+  ];
+
+  for (let i = 0; i < widths.length; i++) {
+
+    sheet
+      .getRangeByIndexes(
+        0,
+        i,
+        1,
+        1
+      )
+      .getEntireColumn()
+      .getFormat()
+      .setColumnWidth(widths[i]);
+  }
+}
