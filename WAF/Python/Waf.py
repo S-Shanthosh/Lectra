@@ -1,0 +1,546 @@
+"""
+WAF Report Generator
+--------------------
+HOW IT WORKS — fully idempotent, no raw_input.txt dependency:
+
+  OPTION A — New raw data available (from online Excel or paste):
+    1. Open WAF_Report.xlsx in Excel
+    2. Create a new sheet named exactly:  raw_input
+    3. Paste your pipe-delimited WAF log into column A (header in A1, data from A2)
+    4. Save and close the file
+    5. Run:  python waf_report.py
+    → Script processes raw_input sheet, appends to ConsolidationSheet,
+      deletes raw_input sheet, then syncs all RuleSheets
+
+  OPTION B — No new data, just sync RuleSheets:
+    1. Run:  python waf_report.py   (with WAF_Report.xlsx as-is)
+    → Script detects no raw_input sheet, skips DailyReport,
+      goes straight to RuleSheet sync from ConsolidationSheet
+
+  OPTION C — GenerateMonthlyReport:
+    Uncomment the last line in main() when ready for monthly pivot.
+
+REQUIREMENTS:
+    pip install openpyxl
+"""
+
+import re
+import math
+from collections import defaultdict
+from datetime import datetime, timedelta
+from pathlib import Path
+
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+
+# ── config ────────────────────────────────────────────────────────────────────
+OUTPUT_FILE      = "WAF_Report.xlsx"
+RAW_SHEET_NAME   = "raw_input"          # sheet user pastes raw data into
+
+# ── colours ───────────────────────────────────────────────────────────────────
+GREEN_HEADER = "70AD47"
+GREEN_PIVOT  = "00B050"
+BLACK        = "000000"
+
+# ── column widths (matched to client SharePoint Excel measurements) ───────────
+COL_WIDTHS = {
+    "A": 18.43,   # Date
+    "B": 32.00,   # Rule Set
+    "C": 36.00,   # Rule
+    "D": 33.71,   # URI
+    "E": 58.14,   # Args
+}
+HEADERS = ["Date", "Rule Set", "Rule", "URI", "Args"]
+
+# ── raw pipe-column indices ───────────────────────────────────────────────────
+IDX_TS  = 0
+IDX_RG  = 5
+IDX_RI  = 6
+IDX_URI = 11
+IDX_ARG = 12
+
+EXPECTED_HEADER = (
+    "timestamp|terminatingRuleId|action|httpSourceName|httpSourceId|"
+    "ruleGroupId|ruleId|clientIp|country|PLMUsername|Host|uri|args|"
+    "httpVersion|httpMethod"
+)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STYLE HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def thin_border():
+    s = Side(style="thin", color=BLACK)
+    return Border(left=s, right=s, top=s, bottom=s)
+
+
+def style_header_row(ws):
+    """Green header, bold, centred, freeze row 1."""
+    fill  = PatternFill("solid", fgColor=GREEN_HEADER)
+    font  = Font(bold=True, color=BLACK)
+    align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    b     = thin_border()
+    for col_idx, col_letter in enumerate("ABCDE", 1):
+        cell = ws.cell(row=1, column=col_idx)
+        cell.value     = HEADERS[col_idx - 1]
+        cell.fill      = fill
+        cell.font      = font
+        cell.alignment = align
+        cell.border    = b
+        ws.column_dimensions[col_letter].width = COL_WIDTHS[col_letter]
+    ws.row_dimensions[1].height = 21
+    ws.freeze_panes = "A2"
+
+
+def calculate_row_height(cell_value: str, column_width: float, font_size: int = 11) -> float:
+    """
+    Calculate approximate row height needed for wrapped text.
+    
+    Args:
+        cell_value: The text content
+        column_width: Width of the column in Excel units
+        font_size: Font size in points (default 11)
+    
+    Returns:
+        Approximate row height in points
+    """
+    if not cell_value:
+        return 15  # Minimum row height
+    
+    # Approximate characters that fit per line based on column width
+    # Average character width at 11pt is roughly 7 pixels
+    # Excel column width units: 1 unit = ~7 pixels
+    pixels_per_column_unit = 7
+    column_pixels = column_width * pixels_per_column_unit
+    chars_per_line = max(1, int(column_pixels / 7))  # ~7 pixels per character
+    
+    # Count newlines in the text
+    newline_count = str(cell_value).count('\n')
+    
+    # Split by newlines and calculate lines needed
+    lines = []
+    for segment in str(cell_value).split('\n'):
+        if not segment:
+            lines.append(1)  # Empty line
+            continue
+        # Calculate how many lines this segment needs
+        segment_len = len(segment)
+        lines_needed = math.ceil(segment_len / chars_per_line)
+        lines.append(max(1, lines_needed))
+    
+    total_lines = sum(lines)
+    
+    # Each line needs roughly 15 points of height at 11pt font
+    line_height = 15
+    row_height = total_lines * line_height
+    
+    # Add a small padding
+    row_height += 4
+    
+    return max(15, row_height)  # Minimum 15 points
+
+
+def style_new_rows(ws, from_row: int):
+    """Apply borders + wrap to newly added rows and calculate appropriate row heights."""
+    if from_row > ws.max_row:
+        return
+    
+    # ── ENSURE COLUMN WIDTHS ARE CONSISTENT ──────────────────────────────────
+    # If column A has no width set, apply defaults (for newly created sheets)
+    # This ensures all sheets have consistent column widths
+    if ws.column_dimensions['A'].width is None or ws.column_dimensions['A'].width == 0:
+        for col_letter, width in COL_WIDTHS.items():
+            ws.column_dimensions[col_letter].width = width
+    
+    b    = thin_border()
+    fmt  = "DD/MM/YY HH:MM:SS"
+    
+    # Column width map for height calculation
+    col_widths = {
+        1: COL_WIDTHS["A"],  # Date
+        2: COL_WIDTHS["B"],  # Rule Set
+        3: COL_WIDTHS["C"],  # Rule
+        4: COL_WIDTHS["D"],  # URI
+        5: COL_WIDTHS["E"],  # Args
+    }
+    
+    # Process each row
+    for row_num in range(from_row, ws.max_row + 1):
+        max_row_height = 15  # Minimum height
+        
+        for col_num in range(1, 6):  # Columns A-E
+            cell = ws.cell(row=row_num, column=col_num)
+            
+            # Apply border and alignment
+            cell.border = b
+            cell.alignment = Alignment(wrap_text=True, vertical="bottom")
+            
+            # Apply date format to column A
+            if col_num == 1 and cell.value is not None:
+                cell.number_format = fmt
+            
+            # Calculate row height based on content
+            if cell.value is not None:
+                cell_value = str(cell.value)
+                col_width = col_widths.get(col_num, 20)
+                height_needed = calculate_row_height(cell_value, col_width)
+                if height_needed > max_row_height:
+                    max_row_height = height_needed
+        
+        # Set the row height to the maximum needed for this row
+        ws.row_dimensions[row_num].height = max_row_height
+
+
+def sanitise_sheet_name(name: str) -> str:
+    cleaned = re.sub(r"[\[\]*?/\\:]", "", name).strip()
+    return cleaned[:31]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RAW DATA PARSING
+# ══════════════════════════════════════════════════════════════════════════════
+
+def parse_timestamp(raw: str) -> datetime | None:
+    try:
+        return datetime.strptime(raw.strip(), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
+def parse_raw_lines(lines: list[str]) -> list[tuple]:
+    """
+    Parse pipe-delimited WAF log lines.
+    Returns list of (datetime, ruleGroupId, ruleId, uri, args).
+    Expands semicolon multi-rule rows into separate rows.
+    """
+    rows = []
+    for line in lines:
+        line = line.strip()
+        if not line or "|" not in line:
+            continue
+        parts = line.split("|")
+        if len(parts) < 13:
+            continue
+        # skip header line if present
+        if parts[0].strip() == "timestamp":
+            continue
+
+        ts = parse_timestamp(parts[IDX_TS])
+        if ts is None:
+            print(f"  Skipping unrecognised timestamp: {parts[IDX_TS][:30]}")
+            continue
+
+        rg_raw = parts[IDX_RG].strip().replace("AWS#AWS", "AWS")
+        ri_raw = parts[IDX_RI].strip().replace("AWS#AWS", "AWS")
+        uri    = parts[IDX_URI].strip()
+        args   = parts[IDX_ARG].strip() if len(parts) > IDX_ARG else ""
+
+        if uri.startswith("="):  uri  = "'" + uri
+        if args.startswith("="): args = "'" + args
+
+        rg_list = [v.strip() for v in rg_raw.split(";") if v.strip()]
+        ri_list = [v.strip() for v in ri_raw.split(";") if v.strip()]
+        pair_count = max(len(rg_list), len(ri_list), 1)
+
+        for p in range(pair_count):
+            rg = rg_list[p] if p < len(rg_list) else ""
+            ri = (ri_list[p] if p < len(ri_list) else "")[:31]
+            if rg or ri:
+                rows.append((ts, rg, ri, uri, args))
+    return rows
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 1 — DailyReport
+# Reads raw_input sheet from WAF_Report.xlsx if present, appends to
+# ConsolidationSheet, then deletes raw_input sheet.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def daily_report(wb: Workbook) -> bool:
+    """
+    Returns True if new data was added, False if skipped.
+    """
+    print("\n=== DailyReport ===")
+
+    if RAW_SHEET_NAME not in wb.sheetnames:
+        print(f"  No '{RAW_SHEET_NAME}' sheet found — skipping DailyReport.")
+        return False
+
+    ws_raw = wb[RAW_SHEET_NAME]
+    lines = []
+    for row in ws_raw.iter_rows(min_row=1, values_only=True):
+        val = row[0]
+        if val is not None:
+            lines.append(str(val))
+
+    if not lines:
+        print(f"  '{RAW_SHEET_NAME}' sheet is empty — skipping DailyReport.")
+        del wb[RAW_SHEET_NAME]
+        return False
+
+    rows = parse_raw_lines(lines)
+    if not rows:
+        print("  No valid rows parsed from raw_input sheet.")
+        del wb[RAW_SHEET_NAME]
+        return False
+
+    print(f"  Parsed {len(rows)} rows from '{RAW_SHEET_NAME}' sheet.")
+
+    # ── get or create ConsolidationSheet ─────────────────────────────────────
+    if "ConsolidationSheet" not in wb.sheetnames:
+        ws = wb.create_sheet("ConsolidationSheet")
+        style_header_row(ws)
+        print("  Created ConsolidationSheet.")
+    else:
+        ws = wb["ConsolidationSheet"]
+        print(f"  ConsolidationSheet has {ws.max_row - 1} existing rows — appending.")
+
+    # build duplicate-check set from existing data
+    existing = set()
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        existing.add("|".join(str(c) if c is not None else "" for c in row))
+
+    first_new_row = ws.max_row + 1
+    added = 0
+    for (ts, rg, ri, uri, args) in rows:
+        key = "|".join([str(ts), rg, ri, uri, args or ""])
+        if key in existing:
+            continue
+        existing.add(key)
+        ws.append([ts, rg, ri, uri, args or None])
+        added += 1
+
+    print(f"  Added {added} new rows to ConsolidationSheet.")
+
+    # style only the new rows — don't reformat existing ones
+    if added > 0:
+        style_new_rows(ws, first_new_row)
+
+    # ── delete raw_input sheet after processing ───────────────────────────────
+    del wb[RAW_SHEET_NAME]
+    print(f"  Deleted '{RAW_SHEET_NAME}' sheet.")
+    return added > 0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 2 — CreateRuleSheets  (idempotent sync)
+# Reads ConsolidationSheet, finds rows not yet in each RuleSheet, adds them.
+# Safe to run anytime — only adds what is missing.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def create_rule_sheets(wb: Workbook):
+    print("\n=== CreateRuleSheets ===")
+
+    if "ConsolidationSheet" not in wb.sheetnames:
+        print("  ERROR: ConsolidationSheet not found.")
+        return
+
+    ws_con = wb["ConsolidationSheet"]
+    headers_row = [c.value for c in ws_con[1]]
+
+    try:
+        rule_col = headers_row.index("Rule")
+    except ValueError:
+        print("  ERROR: 'Rule' column not found in ConsolidationSheet.")
+        return
+
+    # Read all consolidated rows once
+    all_con_rows = list(ws_con.iter_rows(min_row=2, values_only=True))
+
+    # Group by rule sheet name
+    rule_groups: dict[str, list] = defaultdict(list)
+    for row in all_con_rows:
+        raw_rule = row[rule_col]
+        if not raw_rule:
+            continue
+        sheet_name = sanitise_sheet_name(str(raw_rule))
+        rule_groups[sheet_name].append(row)
+
+    print(f"  {len(rule_groups)} unique rules in ConsolidationSheet.")
+
+    total_added = 0
+    for sheet_name, con_rows in rule_groups.items():
+
+        # get or create rule sheet — never reformat existing content
+        if sheet_name not in wb.sheetnames:
+            ws = wb.create_sheet(sheet_name)
+            style_header_row(ws)
+            existing = set()
+        else:
+            ws = wb[sheet_name]
+            # build existing row set for duplicate check
+            existing = set()
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                existing.add("|".join(str(c) if c is not None else "" for c in row))
+
+        first_new_row = ws.max_row + 1
+        added = 0
+        for row in con_rows:
+            key = "|".join(str(c) if c is not None else "" for c in row)
+            if key in existing:
+                continue
+            existing.add(key)
+            ws.append(list(row))
+            added += 1
+
+        # style only newly added rows
+        if added > 0:
+            style_new_rows(ws, first_new_row)
+            total_added += added
+
+        status = f"+{added} new" if added > 0 else "already up to date"
+        print(f"  [{sheet_name}] {status}")
+
+    print(f"  Total new rows added across all rule sheets: {total_added}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 3 — GenerateMonthlyReport
+# ══════════════════════════════════════════════════════════════════════════════
+
+def generate_monthly_report(wb: Workbook):
+    print("\n=== GenerateMonthlyReport ===")
+
+    if "ConsolidationSheet" not in wb.sheetnames:
+        print("  ERROR: ConsolidationSheet not found.")
+        return
+
+    ws_con   = wb["ConsolidationSheet"]
+    date_idx = 0
+    rg_idx   = 1
+    rule_idx = 2
+
+    counts: dict[tuple, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    all_dates: set[str] = set()
+    month_name = ""
+
+    for row in ws_con.iter_rows(min_row=2, values_only=True):
+        dt_val   = row[date_idx]
+        rg_val   = row[rg_idx]   or ""
+        rule_val = row[rule_idx] or ""
+        if dt_val is None:
+            continue
+        if isinstance(dt_val, datetime):
+            dt = dt_val
+        elif isinstance(dt_val, (int, float)):
+            dt = datetime(1899, 12, 30) + timedelta(days=dt_val)
+        else:
+            continue
+        date_str = dt.strftime("%d/%m/%y")
+        all_dates.add(date_str)
+        if not month_name:
+            month_name = dt.strftime("%B")
+        counts[(rg_val, rule_val)][date_str] += 1
+
+    if not counts:
+        print("  No data found.")
+        return
+
+    sorted_dates      = sorted(all_dates, key=lambda s: datetime.strptime(s, "%d/%m/%y"))
+    rule_sets_ordered = sorted(set(k[0] for k in counts))
+
+    pivot_rows: list[tuple] = []
+    grand_total_by_date: dict[str, int] = defaultdict(int)
+
+    for rs in rule_sets_ordered:
+        rs_totals: dict[str, int] = defaultdict(int)
+        child_rows = []
+        for rule in sorted(set(k[1] for k in counts if k[0] == rs)):
+            rc = counts[(rs, rule)]
+            for d, v in rc.items():
+                rs_totals[d] += v
+                grand_total_by_date[d] += v
+            child_rows.append((rule, rc))
+        pivot_rows.append((rs, True, dict(rs_totals)))
+        for (rule, rc) in child_rows:
+            pivot_rows.append((rule, False, dict(rc)))
+
+    if "Consolidation" in wb.sheetnames:
+        del wb["Consolidation"]
+    ws2 = wb.create_sheet("Consolidation")
+
+    header = [f"WAF US PRD {month_name}"]
+    for ds in sorted_dates:
+        header.append(f"{month_name[:3]} {int(ds[:2])}")
+    header.append("Grand Total")
+
+    green_fill = PatternFill("solid", fgColor=GREEN_PIVOT)
+    bold_font  = Font(bold=True, color=BLACK)
+    centre     = Alignment(horizontal="center", vertical="center")
+    b          = thin_border()
+
+    for col_idx, val in enumerate(header, 1):
+        cell = ws2.cell(row=1, column=col_idx, value=val)
+        cell.fill = green_fill; cell.font = bold_font
+        cell.alignment = centre; cell.border = b
+        cell.number_format = "@"
+
+    ws2.row_dimensions[1].height = 26.25
+    ws2.column_dimensions["A"].width = 30.7
+    ws2.freeze_panes = "A2"
+
+    wrap_align = Alignment(wrap_text=True)
+    for (label, is_rs, day_counts) in pivot_rows:
+        row_data = [label]
+        for ds in sorted_dates:
+            v = day_counts.get(ds)
+            row_data.append(v if v else None)
+        row_data.append(sum(day_counts.values()) or None)
+        rn = ws2.max_row + 1
+        for ci, val in enumerate(row_data, 1):
+            cell = ws2.cell(row=rn, column=ci, value=val)
+            cell.border = b; cell.alignment = wrap_align
+            if is_rs: cell.font = Font(bold=True)
+
+    gt_row = ["Grand Total"]
+    grand_total = 0
+    for ds in sorted_dates:
+        v = grand_total_by_date.get(ds, 0)
+        gt_row.append(v if v else None)
+        grand_total += v
+    gt_row.append(grand_total or None)
+    rn = ws2.max_row + 1
+    for ci, val in enumerate(gt_row, 1):
+        cell = ws2.cell(row=rn, column=ci, value=val)
+        cell.fill = green_fill; cell.font = bold_font
+        cell.alignment = centre; cell.border = b
+
+    for col_idx in range(2, len(header) + 1):
+        ws2.column_dimensions[get_column_letter(col_idx)].width = 8
+
+    wb["ConsolidationSheet"].title = "ConsolidationSheet-old"
+
+    print(f"  Consolidation sheet written — {len(sorted_dates)} date cols, "
+          f"{len(pivot_rows)} rule rows, grand total {grand_total}.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MAIN
+# ══════════════════════════════════════════════════════════════════════════════
+
+if __name__ == "__main__":
+    out = OUTPUT_FILE
+
+    # Load or create workbook
+    if Path(out).exists():
+        wb = load_workbook(out)
+        print(f"Opened: {out}")
+    else:
+        wb = Workbook()
+        wb.remove(wb.active)
+        print(f"Creating new: {out}")
+
+    # Step 1 — DailyReport (runs only if raw_input sheet exists)
+    daily_report(wb)
+
+    # Step 2 — CreateRuleSheets (always runs, idempotent)
+    if "ConsolidationSheet" in wb.sheetnames:
+        create_rule_sheets(wb)
+
+    # Step 3 — Monthly report (uncomment when ready)
+    # generate_monthly_report(wb)
+
+    wb.save(out)
+    print(f"\nDone. Saved → {out}")
