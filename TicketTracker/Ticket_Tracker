@@ -323,45 +323,16 @@ function main(workbook: ExcelScript.Workbook) {
   }
 
   // ============================================================
-  // FORMAT DATE COLUMNS
+  // FORMAT NEW DATA
+  // ============================================================
+  //
+  // NOTE: Created/Acknowledged/Resolved are written as already-
+  // formatted TEXT strings (d/M/yyyy h:mm AM/PM), not native Excel
+  // date serials, so no setNumberFormat() call is applied to them -
+  // it would have no visual effect on text values and was removed.
   // ============================================================
 
   const firstNewRow = nextRow;
-  const lastNewRow = nextRow + newTickets.length - 1;
-
-  // Created
-  reportSheet
-    .getRangeByIndexes(
-      firstNewRow,
-      3,
-      newTickets.length,
-      1
-    )
-    .setNumberFormat("d/m/yy h:mm AM/PM");
-
-  // Acknowledged
-  reportSheet
-    .getRangeByIndexes(
-      firstNewRow,
-      4,
-      newTickets.length,
-      1
-    )
-    .setNumberFormat("d/m/yy h:mm AM/PM");
-
-  // Resolved
-  reportSheet
-    .getRangeByIndexes(
-      firstNewRow,
-      5,
-      newTickets.length,
-      1
-    )
-    .setNumberFormat("d/m/yy h:mm AM/PM");
-
-  // ============================================================
-  // FORMAT NEW DATA
-  // ============================================================
 
   const newRange = reportSheet.getRangeByIndexes(
     firstNewRow,
@@ -369,8 +340,6 @@ function main(workbook: ExcelScript.Workbook) {
     newTickets.length,
     REPORT_HEADERS.length
   );
-
-  newRange.getFormat().setWrapText(true);
 
   newRange.getFormat().setVerticalAlignment(
     ExcelScript.VerticalAlignment.center
@@ -387,10 +356,15 @@ function main(workbook: ExcelScript.Workbook) {
   }
 
   // ============================================================
-  // COLUMN WIDTHS
+  // AUTOFIT COLUMNS & ROWS
+  // ============================================================
+  //
+  // Replaces the old fixed pixel-width columns / wrapped-text
+  // rows, which made cells look oversized. Autofit sizes each
+  // column/row to its actual content instead.
   // ============================================================
 
-  setColumnWidths(reportSheet);
+  autofitSheet(reportSheet);
 
   // ============================================================
   // FREEZE HEADER
@@ -452,12 +426,24 @@ function cleanText(
 //
 // Converts common JIRA/Excel date formats into:
 //
-// d/M/yy h:mm AM/PM
+// d/M/yyyy h:mm AM/PM   (Date/Month/Year, 4-digit year)
 //
-// Examples:
+// Raw JIRA numeric exports come in as MM/DD/YYYY (US format,
+// e.g. "8/6/2026 21:24" = 6th August 2026). That is EXPLICITLY
+// parsed as month/day/year below and re-emitted as day/month/year,
+// e.g. "6/8/2026 9:24 PM".
+//
+// IMPORTANT: the explicit JIRA-pattern / numeric-pattern checks
+// run BEFORE the generic `new Date(text)` fallback. Letting the
+// generic parser go first was the original bug - its behavior for
+// ambiguous "M/D/Y" strings is implementation-defined, so it could
+// silently pass the date through unswapped depending on the runtime.
+// Explicit parsing removes that ambiguity.
+//
+// Examples handled:
 //
 // 04/Aug/26 5:49 PM
-// 7/28/2026 6:52
+// 8/6/2026 21:24        -> 6/8/2026 9:24 PM
 // August 11, 2026 at 6:01 AM
 // Excel serial numbers
 // ================================================================
@@ -508,17 +494,7 @@ function formatJiraDate(
   );
 
   // ------------------------------------------------------------
-  // Try normal JavaScript parsing
-  // ------------------------------------------------------------
-
-  let date = new Date(text);
-
-  if (!isNaN(date.getTime())) {
-    return formatDateObject(date);
-  }
-
-  // ------------------------------------------------------------
-  // Handle:
+  // Handle (checked FIRST - unambiguous, has month name):
   //
   // 04/Aug/26 5:49 PM
   // ------------------------------------------------------------
@@ -564,9 +540,11 @@ function formatJiraDate(
   }
 
   // ------------------------------------------------------------
-  // Handle:
+  // Handle (checked SECOND - explicit MM/DD/YYYY assumption,
+  // matches raw JIRA numeric export):
   //
   // 7/28/2026 6:52
+  // 8/6/2026 21:24
   // ------------------------------------------------------------
 
   const numericMatch = text.match(
@@ -575,11 +553,11 @@ function formatJiraDate(
 
   if (numericMatch) {
 
-    const dayOrMonth1 = Number(
+    const monthRaw = Number(
       numericMatch[1]
     );
 
-    const dayOrMonth2 = Number(
+    const dayRaw = Number(
       numericMatch[2]
     );
 
@@ -601,9 +579,9 @@ function formatJiraDate(
 
     const ampm = numericMatch[6];
 
-    // Assume MM/DD/YYYY for numeric JIRA export
-    const month = dayOrMonth1 - 1;
-    const day = dayOrMonth2;
+    // Raw JIRA numeric export is always MM/DD/YYYY (US format).
+    const month = monthRaw - 1;
+    const day = dayRaw;
 
     if (ampm) {
 
@@ -634,6 +612,18 @@ function formatJiraDate(
   }
 
   // ------------------------------------------------------------
+  // Fallback (checked LAST): generic JavaScript date parsing,
+  // e.g. ISO strings ("2026-08-06T21:24:00") or
+  // "August 11, 2026 at 6:01 AM".
+  // ------------------------------------------------------------
+
+  const date = new Date(text);
+
+  if (!isNaN(date.getTime())) {
+    return formatDateObject(date);
+  }
+
+  // ------------------------------------------------------------
   // If Excel/JIRA gives something we don't understand,
   // preserve the original value rather than destroying data.
   // ------------------------------------------------------------
@@ -644,6 +634,9 @@ function formatJiraDate(
 
 // ================================================================
 // FORMAT DATE OBJECT
+// ================================================================
+//
+// Outputs D/M/YYYY h:mm AM/PM (4-digit year).
 // ================================================================
 
 function formatDateObject(
@@ -660,7 +653,7 @@ function formatDateObject(
     date.getMonth() + 1;
 
   const year =
-    String(date.getFullYear()).slice(-2);
+    date.getFullYear();
 
   let hours =
     date.getHours();
@@ -796,14 +789,6 @@ function formatReportHeader(
       ExcelScript.VerticalAlignment.center
     );
 
-  header
-    .getFormat()
-    .setWrapText(true);
-
-  header
-    .getFormat()
-    .setRowHeight(30);
-
   applyBorders(header);
 }
 
@@ -844,36 +829,24 @@ function applyBorders(
 
 
 // ================================================================
-// COLUMN WIDTHS
+// AUTOFIT SHEET
+// ================================================================
+//
+// Autofits every used column and row to its content instead of
+// using fixed pixel widths / forced wrap text, which made cells
+// look oversized.
 // ================================================================
 
-function setColumnWidths(
+function autofitSheet(
   sheet: ExcelScript.Worksheet
 ) {
 
-  const widths = [
-    95,   // Ticket No
-    420,  // Ticket Details
-    105,  // Jira
-    145,  // Created
-    170,  // Acknowledged
-    145,  // Resolved
-    130,  // Reporter
-    140,  // Assigned To
-    100   // Status
-  ];
+  const usedRange = sheet.getUsedRange(true);
 
-  for (let i = 0; i < widths.length; i++) {
-
-    sheet
-      .getRangeByIndexes(
-        0,
-        i,
-        1,
-        1
-      )
-      .getEntireColumn()
-      .getFormat()
-      .setColumnWidth(widths[i]);
+  if (!usedRange) {
+    return;
   }
+
+  usedRange.getFormat().autofitColumns();
+  usedRange.getFormat().autofitRows();
 }
