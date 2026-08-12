@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JIRA Ticket Report Generator - Offline</title>
+<style>
+body{font-family:Arial,sans-serif;margin:24px;background:#f5f6f8;color:#222}
+h1{margin-bottom:6px}.note{color:#555;margin-bottom:18px}
+textarea{width:100%;min-height:260px;box-sizing:border-box;padding:12px;font-family:Consolas,monospace;font-size:13px}
+button{padding:10px 18px;margin:12px 8px 12px 0;cursor:pointer;border:1px solid #888;border-radius:4px;background:white}
+button:hover{background:#eee}#status{margin:8px 0 14px;font-weight:bold}
+.table-wrap{overflow-x:auto;background:white;border:1px solid #ccc}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{border:1px solid #aaa;padding:7px 9px;text-align:left;vertical-align:top}
+th{background:#e9ecef;white-space:nowrap}td a{color:#0563c1;text-decoration:underline}
+</style>
+</head>
+<body>
+<h1>JIRA Ticket Report Generator</h1>
+<div class="note">
+Paste raw JIRA CSV below. This works completely offline.
+Raw dates are interpreted as <b>MM/DD/YYYY</b> and displayed as <b>DD/MM/YYYY</b>.
+</div>
+<textarea id="raw" placeholder="Paste JIRA CSV here..."></textarea>
+<div>
+<button onclick="generateReport()">Generate Report</button>
+<button onclick="copyReport()">Copy Report</button>
+<button onclick="clearAll()">Clear</button>
+</div>
+<div id="status"></div>
+<div id="output"></div>
+
+<script>
+const JIRA_BASE="https://lectragroup.atlassian.net/browse/";
+const OUTPUT_HEADERS=[
+"Ticket No","Ticket Details","Jira","Created Time (IST)",
+"Acknowledged Time (IST)","Resolved Time (IST)","Reporter","Assigned To","Status"
+];
+let generatedRows=[];
+
+function parseCSV(text){
+ // Normalize line endings, and strip trailing tab/space padding from each
+ // line - a common paste artifact from Excel selections that include
+ // extra empty columns. Without this, a stray trailing tab on an
+ // otherwise comma-separated line would wrongly trigger tab-mode below.
+ const lines=text.replace(/\r\n?/g,"\n").split("\n").map(l=>l.replace(/[ \t]+$/,""));
+ text=lines.join("\n");
+
+ // Auto-detect delimiter: pasting straight from Excel/Jira table view
+ // gives tab-separated text, not comma-separated. Look at the first
+ // line and use whichever delimiter actually appears there.
+ const firstLine=lines[0]||"";
+ const delimiter=firstLine.includes("\t")?"\t":",";
+ const rows=[];let row=[],field="",quoted=false;
+ for(let i=0;i<text.length;i++){
+  const c=text[i],n=text[i+1];
+  if(c==='"'&&quoted&&n==='"'){field+='"';i++}
+  else if(c==='"') quoted=!quoted;
+  else if(c===delimiter&&!quoted){row.push(field);field=""}
+  else if((c==='\n'||c==='\r')&&!quoted){
+   if(c==='\r'&&n==='\n')i++;
+   row.push(field);
+   if(row.some(v=>v.trim()!==""))rows.push(row);
+   row=[];field="";
+  }else field+=c;
+ }
+ if(field!==""||row.length){row.push(field);if(row.some(v=>v.trim()!==""))rows.push(row)}
+ return rows;
+}
+function clean(v){return String(v??"").trim()}
+function normalizeHeader(v){return clean(v).toLowerCase().replace(/\s+/g," ")}
+const MONTH_NAMES=["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"];
+function to24Hour(hour,minute,ampm){
+ if(!ampm)return{hour,minute};
+ const up=ampm.toUpperCase();
+ if(up==="PM"&&hour<12)hour+=12;
+ if(up==="AM"&&hour===12)hour=0;
+ return{hour,minute};
+}
+function parseDateTime(value){
+ value=clean(value);
+ if(!value||value==="########")return null;
+
+ // Month-name format, already unambiguous: "06/Aug/26 2:10 AM"
+ const monthNameMatch=value.match(/^(\d{1,2})\/([A-Za-z]{3})\/(\d{2,4})(?:\s+(\d{1,2}):(\d{2})\s*(AM|PM)?)?/i);
+ if(monthNameMatch){
+  const day=+monthNameMatch[1];
+  const monthIndex=MONTH_NAMES.indexOf(monthNameMatch[2].toLowerCase());
+  if(monthIndex===-1)return null;
+  let year=+monthNameMatch[3];
+  if(year<100)year+=2000;
+  const t=to24Hour(+(monthNameMatch[4]||0),+(monthNameMatch[5]||0),monthNameMatch[6]);
+  return{month:monthIndex+1,day,year,hour:t.hour,minute:t.minute};
+ }
+
+ // Numeric format, raw JIRA export assumption MM/DD/YYYY: "8/6/2026 21:24"
+ const numericMatch=value.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})(?:\s+(\d{1,2}):(\d{2})\s*(AM|PM)?)?/i);
+ if(numericMatch){
+  let year=+numericMatch[3];
+  if(year<100)year+=2000;
+  const t=to24Hour(+(numericMatch[4]||0),+(numericMatch[5]||0),numericMatch[6]);
+  return{month:+numericMatch[1],day:+numericMatch[2],year,hour:t.hour,minute:t.minute};
+ }
+
+ return null;
+}
+function formatDateTime(value){
+ const d=parseDateTime(value);if(!d)return "";
+ let hour12=d.hour%12;if(hour12===0)hour12=12;
+ const ampm=d.hour>=12?"PM":"AM";
+ return String(d.day).padStart(2,"0")+"/"+String(d.month).padStart(2,"0")+"/"+d.year+
+ " "+String(hour12).padStart(2,"0")+":"+String(d.minute).padStart(2,"0")+" "+ampm;
+}
+function generateReport(){
+ const raw=document.getElementById("raw").value.trim();
+ const status=document.getElementById("status"),output=document.getElementById("output");
+ if(!raw){status.textContent="Please paste the raw JIRA data first.";output.innerHTML="";return}
+ const rows=parseCSV(raw);
+ if(rows.length<2){status.textContent="Could not find JIRA data.";return}
+ const headers=rows[0].map(normalizeHeader),index={};
+ headers.forEach((h,i)=>index[h]=i);
+ const required=["issue key","summary","created","reporter","status","resolved"];
+ const missing=required.filter(h=>index[h]===undefined);
+ if(missing.length){status.textContent="Missing columns: "+missing.join(", ");output.innerHTML="";return}
+
+ const seen=new Set();generatedRows=[];
+ for(let r=1;r<rows.length;r++){
+  const row=rows[r],ticket=clean(row[index["issue key"]]);
+  if(!/^OPS-\d+$/i.test(ticket)||seen.has(ticket.toUpperCase()))continue;
+  const assignee=index["assignee"]!==undefined?clean(row[index["assignee"]]):"";
+  generatedRows.push({
+   ticket:ticket.toUpperCase(),
+   summary:clean(row[index["summary"]]),
+   created:formatDateTime(row[index["created"]]),
+   acknowledged:formatDateTime(row[index["resolved"]]),
+   resolved:formatDateTime(row[index["resolved"]]),
+   reporter:clean(row[index["reporter"]])||"Xavier Gastine",
+   assignedTo:assignee||"Shanthosh Selvam",
+   status:clean(row[index["status"]])
+  });
+  seen.add(ticket.toUpperCase());
+ }
+ renderTable();
+ status.textContent=generatedRows.length+" ticket(s) generated. Dates converted from MM/DD/YYYY to DD/MM/YYYY.";
+}
+function esc(v){
+ return String(v??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+ .replace(/"/g,"&quot;").replace(/'/g,"&#039;");
+}
+function renderTable(){
+ const output=document.getElementById("output");
+ if(!generatedRows.length){output.innerHTML="<p>No valid OPS tickets found.</p>";return}
+ let h="<div class='table-wrap'><table><thead><tr>";
+ OUTPUT_HEADERS.forEach(x=>h+="<th>"+esc(x)+"</th>");
+ h+="</tr></thead><tbody>";
+ generatedRows.forEach(r=>{
+  h+="<tr>";
+  h+="<td>"+esc(r.ticket)+"</td>";
+  h+="<td>"+esc(r.summary)+"</td>";
+  h+="<td><a href='"+JIRA_BASE+encodeURIComponent(r.ticket)+"' target='_blank'>"+esc(r.ticket)+"</a></td>";
+  h+="<td>"+esc(r.created)+"</td><td>"+esc(r.acknowledged)+"</td><td>"+esc(r.resolved)+"</td>";
+  h+="<td>"+esc(r.reporter)+"</td><td>"+esc(r.assignedTo)+"</td><td>"+esc(r.status)+"</td>";
+  h+="</tr>";
+ });
+ h+="</tbody></table></div>";output.innerHTML=h;
+}
+async function copyReport(){
+ if(!generatedRows.length){document.getElementById("status").textContent="Generate the report first.";return}
+ const table=document.querySelector("#output table");if(!table)return;
+ const html=table.outerHTML;
+ const text=Array.from(table.rows).map(row=>Array.from(row.cells).map(c=>c.innerText).join("\t")).join("\n");
+ try{
+  await navigator.clipboard.write([new ClipboardItem({
+   "text/html":new Blob([html],{type:"text/html"}),
+   "text/plain":new Blob([text],{type:"text/plain"})
+  })]);
+  document.getElementById("status").textContent="Report copied. Paste directly into Excel.";
+ }catch(e){
+  const range=document.createRange();range.selectNode(table);
+  const sel=window.getSelection();sel.removeAllRanges();sel.addRange(range);
+  document.execCommand("copy");sel.removeAllRanges();
+  document.getElementById("status").textContent="Report copied.";
+ }
+}
+function clearAll(){
+ document.getElementById("raw").value="";
+ document.getElementById("output").innerHTML="";
+ document.getElementById("status").textContent="";
+ generatedRows=[];
+}
+</script>
+</body>
+</html>
