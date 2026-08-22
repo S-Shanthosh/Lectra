@@ -4,7 +4,17 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>WAF Report Generator</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<!--
+  Switched from SheetJS (xlsx.full.min.js) to ExcelJS.
+  Reason: SheetJS Community Edition writes cell VALUES fine but silently drops
+  fills, fonts, borders and row heights on write (that's a paid "Pro" feature
+  there) -- which is exactly why header color / font / row height / column
+  width never came out right no matter how the numbers were tuned.
+  ExcelJS writes full styling for free, and its column-width / row-height
+  units match openpyxl's directly, so the values below are ported straight
+  from Waf.py instead of being re-derived.
+-->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -228,7 +238,7 @@
       <input type="file" id="xlsxFile" accept=".xlsx,.xls">
       <div class="upload-icon">📊</div>
       <p><strong>Click to browse</strong> or drag and drop your WAF_Report.xlsx here</p>
-      <p style="margin-top:4px;font-size:11px;color:#aaa">Existing ConsolidationSheet data will be preserved — new rows appended</p>
+      <p style="margin-top:4px;font-size:11px;color:#aaa">Existing ConsolidationSheet data and formatting are preserved — new rows are appended and styled</p>
     </div>
     <div id="xlsxBadge" class="hidden" style="margin-top:10px"></div>
   </div>
@@ -277,12 +287,14 @@ timestamp|terminatingRuleId|action|httpSourceName|httpSourceId|ruleGroupId|ruleI
 </div><!-- /main -->
 
 <script>
-// ── Constants ──────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════
+// CONSTANTS — ported directly from Waf.py (openpyxl units == ExcelJS units,
+// so no conversion is needed, unlike the old SheetJS "wch" approach).
+// ══════════════════════════════════════════════════════════════════════════
 const HEADERS      = ["Date", "Rule Set", "Rule", "URI", "Args"];
 const GREEN_HEADER = "FF70AD47";
-const GREEN_PIVOT  = "FF00B050";
 const BLACK        = "FF000000";
-const COL_WIDTHS   = [18.43, 32.00, 36.00, 33.71, 58.14];
+const COL_WIDTHS   = [18.43, 32.00, 36.00, 33.71, 58.14]; // A,B,C,D,E
 
 const IDX_TS  = 0, IDX_RG = 5, IDX_RI = 6, IDX_URI = 11, IDX_ARG = 12;
 
@@ -291,18 +303,31 @@ const EXPECTED_HDR =
   "ruleGroupId|ruleId|clientIp|country|PLMUsername|Host|uri|args|" +
   "httpVersion|httpMethod";
 
-// ── State ──────────────────────────────────────────────────────────────────
-let existingWb    = null;   // XLSX workbook object from uploaded file
-let existingFname = "WAF_Report.xlsx";
+const THIN_BORDER = {
+  top:    { style: "thin", color: { argb: BLACK } },
+  left:   { style: "thin", color: { argb: BLACK } },
+  bottom: { style: "thin", color: { argb: BLACK } },
+  right:  { style: "thin", color: { argb: BLACK } },
+};
 
-// ── File upload handlers ───────────────────────────────────────────────────
+// ── State ────────────────────────────────────────────────────────────────
+let existingBuffer = null;   // ArrayBuffer of uploaded existing workbook
+let existingFname  = "WAF_Report.xlsx";
+
+// ── File upload handlers ────────────────────────────────────────────────
 document.getElementById("xlsxFile").addEventListener("change", async e => {
   const file = e.target.files[0]; if (!file) return;
-  existingFname = file.name;
-  const buf  = await file.arrayBuffer();
-  existingWb = XLSX.read(buf, { type: "array", cellDates: true, cellStyles: true });
-  showBadge("xlsxBadge", "📊", file.name, () => { existingWb = null; hideBadge("xlsxBadge"); });
-  setStatus(`Loaded: ${file.name} (${existingWb.SheetNames.length} sheets)`, "success");
+  existingFname   = file.name;
+  existingBuffer  = await file.arrayBuffer();
+  try {
+    const probe = new ExcelJS.Workbook();
+    await probe.xlsx.load(existingBuffer);
+    showBadge("xlsxBadge", "📊", file.name, () => { existingBuffer = null; hideBadge("xlsxBadge"); });
+    setStatus(`Loaded: ${file.name} (${probe.worksheets.length} sheets)`, "success");
+  } catch (err) {
+    existingBuffer = null;
+    setStatus(`Could not read ${file.name} — is it a valid .xlsx file?`, "error");
+  }
 });
 
 document.getElementById("txtFile").addEventListener("change", async e => {
@@ -332,7 +357,9 @@ function showBadge(id, icon, name, onRemove) {
 }
 function hideBadge(id) { document.getElementById(id).classList.add("hidden"); }
 
-// ── Raw data parser ────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════
+// RAW DATA PARSER
+// ══════════════════════════════════════════════════════════════════════════
 function parseRaw(text) {
   const lines = text.replace(/\r\n?/g, "\n").split("\n");
   const rows  = [];
@@ -374,23 +401,182 @@ function parseTimestamp(s) {
   return new Date(+m[1], +m[2]-1, +m[3], +m[4], +m[5], +m[6]);
 }
 
+// Display format shown in Excel (dd/mm/yy hh:mm:ss) — used for the on-page preview only.
 function formatDate(d) {
   const pad = n => String(n).padStart(2,"0");
   return `${pad(d.getDate())}/${pad(d.getMonth()+1)}/${String(d.getFullYear()).slice(-2)} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
-// ── Duplicate check ────────────────────────────────────────────────────────
-function buildExistingSet(ws) {
-  const set = new Set();
-  if (!ws) return set;
-  const data = XLSX.utils.sheet_to_json(ws, { header:1, raw:false });
-  for (let i = 1; i < data.length; i++) {
-    set.add((data[i] || []).join("|"));
-  }
-  return set;
+// Matches Python's str(datetime) -- used only for building stable dedup keys.
+function pyDateStr(d) {
+  const pad = n => String(n).padStart(2,"0");
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
-// ── Main: process + download ───────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════
+// STYLE HELPERS — ported from Waf.py's style_header_row / calculate_row_height / style_new_rows
+// ══════════════════════════════════════════════════════════════════════════
+function styleHeaderRow(ws) {
+  HEADERS.forEach((h, i) => {
+    ws.getColumn(i + 1).width = COL_WIDTHS[i];
+    const cell = ws.getCell(1, i + 1);
+    cell.value = h;
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: GREEN_HEADER } };
+    cell.font = { bold: true, color: { argb: BLACK } };
+    cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+    cell.border = THIN_BORDER;
+  });
+  ws.getRow(1).height = 21;
+  ws.views = [{ state: "frozen", ySplit: 1 }];
+}
+
+// Same approximation as Python's calculate_row_height: ~7px per column-width
+// unit, ~7px per character, 15pt per wrapped line, +4pt padding, 15pt floor.
+function calculateRowHeight(cellText, columnWidth) {
+  if (!cellText) return 15;
+  const pixelsPerColumnUnit = 7;
+  const columnPixels = columnWidth * pixelsPerColumnUnit;
+  const charsPerLine = Math.max(1, Math.floor(columnPixels / 7));
+
+  const segments = String(cellText).split("\n");
+  let totalLines = 0;
+  for (const seg of segments) {
+    if (seg === "") { totalLines += 1; continue; }
+    totalLines += Math.max(1, Math.ceil(seg.length / charsPerLine));
+  }
+  const rowHeight = totalLines * 15 + 4;
+  return Math.max(15, rowHeight);
+}
+
+// Styles + sizes only the newly appended rows (fromRow..end) -- existing rows
+// (and their formatting) are left untouched, same as Waf.py.
+function styleNewRows(ws, fromRow) {
+  if (fromRow > ws.rowCount) return;
+
+  // Ensure column widths exist (for brand-new sheets created outside styleHeaderRow).
+  if (!ws.getColumn(1).width) {
+    COL_WIDTHS.forEach((w, i) => { ws.getColumn(i + 1).width = w; });
+  }
+
+  for (let r = fromRow; r <= ws.rowCount; r++) {
+    let maxHeight = 15;
+    for (let c = 1; c <= 5; c++) {
+      const cell = ws.getCell(r, c);
+      cell.border = THIN_BORDER;
+      cell.alignment = { wrapText: true, vertical: "bottom" };
+
+      if (c === 1 && cell.value !== null && cell.value !== undefined) {
+        cell.numFmt = "dd/mm/yy hh:mm:ss";
+      }
+
+      let text;
+      if (cell.value instanceof Date) text = pyDateStr(cell.value);
+      else if (cell.value !== null && cell.value !== undefined) text = String(cell.value);
+      else text = "";
+
+      const h = calculateRowHeight(text, COL_WIDTHS[c - 1]);
+      if (h > maxHeight) maxHeight = h;
+    }
+    ws.getRow(r).height = maxHeight;
+  }
+}
+
+function sanitizeSheetName(name) {
+  return name.replace(/[\[\]*?/\\:]/g, "").trim().slice(0, 31);
+}
+
+function cellKeyPart(v) {
+  if (v === null || v === undefined) return "";
+  if (v instanceof Date) return pyDateStr(v);
+  return String(v).trim();
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// ConsolidationSheet — append (in-memory rows -> workbook)
+// ══════════════════════════════════════════════════════════════════════════
+function appendToConsolidation(workbook, newRows) {
+  let ws = workbook.getWorksheet("ConsolidationSheet");
+  const existingSet = new Set();
+
+  if (!ws) {
+    ws = workbook.addWorksheet("ConsolidationSheet");
+    styleHeaderRow(ws);
+  } else {
+    ws.eachRow({ includeEmpty: false }, (row, rowNumber) => {
+      if (rowNumber === 1) return;
+      const vals = row.values.slice(1, 6);
+      existingSet.add(vals.map(cellKeyPart).join("|"));
+    });
+  }
+
+  const firstNewRow = ws.rowCount + 1;
+  let added = 0;
+  for (const row of newRows) {
+    const key = [pyDateStr(row.ts), row.rg, row.ri, row.uri, row.args || ""].join("|");
+    if (existingSet.has(key)) continue;
+    existingSet.add(key);
+    ws.addRow([row.ts, row.rg, row.ri, row.uri, row.args || null]);
+    added++;
+  }
+
+  if (added > 0) styleNewRows(ws, firstNewRow);
+  return added;
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// RuleSheets sync — idempotent, groups ConsolidationSheet rows by Rule
+// ══════════════════════════════════════════════════════════════════════════
+function syncRuleSheets(workbook) {
+  const ws = workbook.getWorksheet("ConsolidationSheet");
+  if (!ws) return 0;
+
+  const groups = new Map(); // sheetName -> array of [date, rg, rule, uri, args]
+  ws.eachRow({ includeEmpty: false }, (row, rowNumber) => {
+    if (rowNumber === 1) return;
+    const vals = row.values.slice(1, 6);
+    const ruleRaw = vals[2];
+    if (!ruleRaw) return;
+    const sheetName = sanitizeSheetName(String(ruleRaw));
+    if (!sheetName) return;
+    if (!groups.has(sheetName)) groups.set(sheetName, []);
+    groups.get(sheetName).push(vals);
+  });
+
+  let totalAdded = 0;
+  for (const [sheetName, rows] of groups) {
+    let ruleWs = workbook.getWorksheet(sheetName);
+    const existingSet = new Set();
+
+    if (!ruleWs) {
+      ruleWs = workbook.addWorksheet(sheetName);
+      styleHeaderRow(ruleWs);
+    } else {
+      ruleWs.eachRow({ includeEmpty: false }, (row, rowNumber) => {
+        if (rowNumber === 1) return;
+        const vals = row.values.slice(1, 6);
+        existingSet.add(vals.map(cellKeyPart).join("|"));
+      });
+    }
+
+    const firstNewRow = ruleWs.rowCount + 1;
+    let added = 0;
+    for (const vals of rows) {
+      const key = vals.map(cellKeyPart).join("|");
+      if (existingSet.has(key)) continue;
+      existingSet.add(key);
+      ruleWs.addRow(vals);
+      added++;
+    }
+
+    if (added > 0) styleNewRows(ruleWs, firstNewRow);
+    totalAdded += added;
+  }
+  return totalAdded;
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// Main: process + download
+// ══════════════════════════════════════════════════════════════════════════
 async function processAndDownload() {
   const rawText = document.getElementById("rawData").value.trim();
   if (!rawText) { setStatus("Paste your raw WAF log data first.", "error"); return; }
@@ -402,29 +588,30 @@ async function processAndDownload() {
   if (!newRows.length) { setStatus("No valid rows found. Check the format.", "error"); setProgress(0); return; }
 
   setStatus(`Parsed ${newRows.length} rows. Building Excel file…`, "info");
-  setProgress(30);
+  setProgress(25);
 
-  // Build or clone workbook
-  let wb;
-  if (existingWb) {
-    // clone by re-reading (XLSX objects aren't deep-cloneable easily)
-    wb = existingWb;
-  } else {
-    wb = XLSX.utils.book_new();
+  const workbook = new ExcelJS.Workbook();
+  if (existingBuffer) {
+    await workbook.xlsx.load(existingBuffer);
   }
 
-  setProgress(50);
-  appendToConsolidation(wb, newRows);
-  setProgress(75);
-  syncRuleSheets(wb);
-  setProgress(90);
+  setProgress(45);
+  const added = appendToConsolidation(workbook, newRows);
+  setProgress(70);
+  const ruleAdded = syncRuleSheets(workbook);
+  setProgress(85);
 
-  // Download
+  const buf = await workbook.xlsx.writeBuffer();
+  const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
   const fname = existingFname.replace(/\.xlsx?$/i, "") + "_updated.xlsx";
-  XLSX.writeFile(wb, fname);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = fname;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
 
   setProgress(100);
-  setStatus(`✅ Done — ${newRows.length} rows processed. Download started: ${fname}`, "success");
+  setStatus(`✅ Done — ${added} new row(s) added to ConsolidationSheet, ${ruleAdded} across rule sheets. Download started: ${fname}`, "success");
   setTimeout(() => setProgress(0), 2000);
 }
 
@@ -440,138 +627,6 @@ function previewOnly() {
   renderPreviewTable(newRows.slice(0, 50));
   document.getElementById("previewSection").classList.remove("hidden");
   setStatus(`Preview: showing first 50 of ${newRows.length} parsed rows.`, "info");
-}
-
-// ── ConsolidationSheet ─────────────────────────────────────────────────────
-function appendToConsolidation(wb, newRows) {
-  let ws = wb.Sheets["ConsolidationSheet"];
-  let existingSet = new Set();
-  let nextRow = 2; // 1-indexed, row 1 = header
-
-  if (ws) {
-    existingSet = buildExistingSet(ws);
-    const range = XLSX.utils.decode_range(ws["!ref"] || "A1");
-    nextRow = range.e.r + 2; // after last row
-  } else {
-    ws = XLSX.utils.aoa_to_sheet([HEADERS]);
-    applyHeaderStyle(ws, 1, HEADERS.length);
-    setColWidths(ws);
-    XLSX.utils.book_append_sheet(wb, ws, "ConsolidationSheet");
-  }
-
-  let added = 0;
-  for (const row of newRows) {
-    const dateStr = formatDate(row.ts);
-    const key     = [dateStr, row.rg, row.ri, row.uri, row.args].join("|");
-    if (existingSet.has(key)) continue;
-    existingSet.add(key);
-
-    const r = nextRow - 1; // 0-indexed
-    setCellVal(ws, r, 0, dateStr);
-    setCellVal(ws, r, 1, row.rg);
-    setCellVal(ws, r, 2, row.ri);
-    setCellVal(ws, r, 3, row.uri);
-    setCellVal(ws, r, 4, row.args || "");
-    applyRowStyle(ws, r, HEADERS.length);
-
-    nextRow++; added++;
-  }
-
-  // Update sheet range
-  const lastRow = nextRow - 1;
-  ws["!ref"] = XLSX.utils.encode_range({ s:{r:0,c:0}, e:{r:lastRow-1,c:4} });
-  setColWidths(ws);
-  return added;
-}
-
-// ── RuleSheets sync ────────────────────────────────────────────────────────
-function syncRuleSheets(wb) {
-  const ws = wb.Sheets["ConsolidationSheet"];
-  if (!ws) return;
-
-  const allRows = XLSX.utils.sheet_to_json(ws, { header:1, raw:false }).slice(1);
-
-  // Group by rule
-  const groups = {};
-  for (const row of allRows) {
-    const rule = (row[2] || "").trim().replace(/[\[\]\*\?\/\:]/g,"").substring(0,31);
-    if (!rule) continue;
-    if (!groups[rule]) groups[rule] = [];
-    groups[rule].push(row);
-  }
-
-  for (const [ruleName, rows] of Object.entries(groups)) {
-    let ruleWs = wb.Sheets[ruleName];
-    let existingSet = new Set();
-    let nextRow = 2;
-
-    if (ruleWs) {
-      existingSet = buildExistingSet(ruleWs);
-      const range = XLSX.utils.decode_range(ruleWs["!ref"] || "A1");
-      nextRow = range.e.r + 2;
-    } else {
-      ruleWs = XLSX.utils.aoa_to_sheet([HEADERS]);
-      applyHeaderStyle(ruleWs, 1, HEADERS.length);
-      setColWidths(ruleWs);
-      XLSX.utils.book_append_sheet(wb, ruleWs, ruleName);
-    }
-
-    for (const row of rows) {
-      const key = (row || []).join("|");
-      if (existingSet.has(key)) continue;
-      existingSet.add(key);
-
-      const r = nextRow - 1;
-      for (let c = 0; c < 5; c++) {
-        setCellVal(ruleWs, r, c, row[c] || "");
-      }
-      applyRowStyle(ruleWs, r, HEADERS.length);
-      nextRow++;
-    }
-
-    const lastRow = nextRow - 1;
-    ruleWs["!ref"] = XLSX.utils.encode_range({ s:{r:0,c:0}, e:{r:lastRow-1,c:4} });
-    setColWidths(ruleWs);
-  }
-}
-
-// ── XLSX cell helpers ──────────────────────────────────────────────────────
-function setCellVal(ws, r, c, val) {
-  const addr = XLSX.utils.encode_cell({ r, c });
-  ws[addr] = { t:"s", v: String(val ?? "") };
-}
-
-function applyHeaderStyle(ws, rowCount, colCount) {
-  for (let c = 0; c < colCount; c++) {
-    const addr = XLSX.utils.encode_cell({ r:0, c });
-    if (!ws[addr]) ws[addr] = { t:"s", v: HEADERS[c] };
-    ws[addr].s = {
-      fill:  { patternType:"solid", fgColor:{ rgb:"70AD47" } },
-      font:  { bold:true, color:{ rgb:"000000" } },
-      alignment: { horizontal:"center", vertical:"center", wrapText:true },
-      border: thinBorderStyle()
-    };
-  }
-}
-
-function applyRowStyle(ws, r, colCount) {
-  for (let c = 0; c < colCount; c++) {
-    const addr = XLSX.utils.encode_cell({ r, c });
-    if (!ws[addr]) ws[addr] = { t:"s", v:"" };
-    ws[addr].s = {
-      alignment: { wrapText:true, vertical:"bottom" },
-      border: thinBorderStyle()
-    };
-  }
-}
-
-function thinBorderStyle() {
-  const side = { style:"thin", color:{ rgb:"000000" } };
-  return { top:side, bottom:side, left:side, right:side };
-}
-
-function setColWidths(ws) {
-  ws["!cols"] = COL_WIDTHS.map(w => ({ wch: w }));
 }
 
 // ── Preview render ─────────────────────────────────────────────────────────
@@ -627,8 +682,8 @@ function clearAll() {
   document.getElementById("previewSection").classList.add("hidden");
   document.getElementById("xlsxBadge").classList.add("hidden");
   document.getElementById("txtBadge").classList.add("hidden");
-  existingWb    = null;
-  existingFname = "WAF_Report.xlsx";
+  existingBuffer = null;
+  existingFname  = "WAF_Report.xlsx";
   setProgress(0);
 }
 
