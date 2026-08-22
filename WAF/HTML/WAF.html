@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WAF Report Generator</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Segoe UI', Arial, sans-serif;
+    background: #f0f2f5;
+    color: #1a1a2e;
+    min-height: 100vh;
+  }
+
+  /* ── Header ── */
+  .header {
+    background: #1a1a2e;
+    color: #fff;
+    padding: 18px 32px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    border-bottom: 3px solid #70AD47;
+  }
+  .header-icon {
+    width: 36px; height: 36px;
+    background: #70AD47;
+    border-radius: 6px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px;
+  }
+  .header h1 { font-size: 18px; font-weight: 600; letter-spacing: 0.3px; }
+  .header p  { font-size: 12px; color: #aab; margin-top: 2px; }
+
+  /* ── Layout ── */
+  .main { max-width: 1000px; margin: 0 auto; padding: 28px 20px; }
+
+  /* ── Cards ── */
+  .card {
+    background: #fff;
+    border: 1px solid #dde2ea;
+    border-radius: 8px;
+    padding: 22px 24px;
+    margin-bottom: 18px;
+  }
+  .card-title {
+    font-size: 13px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: #555;
+    margin-bottom: 14px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .card-title span.step {
+    background: #1a1a2e;
+    color: #fff;
+    border-radius: 50%;
+    width: 20px; height: 20px;
+    font-size: 11px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* ── File upload ── */
+  .upload-zone {
+    border: 2px dashed #c8d0dc;
+    border-radius: 6px;
+    padding: 20px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+    position: relative;
+  }
+  .upload-zone:hover, .upload-zone.drag-over {
+    border-color: #70AD47;
+    background: #f5fbf0;
+  }
+  .upload-zone input[type=file] {
+    position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
+  }
+  .upload-zone .upload-icon { font-size: 28px; margin-bottom: 6px; }
+  .upload-zone p { font-size: 13px; color: #666; }
+  .upload-zone p strong { color: #1a1a2e; }
+  .file-badge {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: #eaf5e1; border: 1px solid #70AD47;
+    border-radius: 20px; padding: 5px 14px;
+    font-size: 13px; color: #3a7a10; margin-top: 10px;
+  }
+  .file-badge .remove {
+    cursor: pointer; color: #888; font-size: 16px; line-height: 1;
+  }
+  .file-badge .remove:hover { color: #c00; }
+
+  /* ── Textarea ── */
+  textarea {
+    width: 100%;
+    min-height: 200px;
+    padding: 12px;
+    font-family: Consolas, 'Courier New', monospace;
+    font-size: 12px;
+    border: 1px solid #dde2ea;
+    border-radius: 6px;
+    resize: vertical;
+    outline: none;
+    transition: border-color 0.2s;
+    color: #222;
+    background: #fafbfc;
+  }
+  textarea:focus { border-color: #70AD47; background: #fff; }
+  textarea::placeholder { color: #aaa; }
+
+  /* ── OR divider ── */
+  .or-divider {
+    display: flex; align-items: center; gap: 12px;
+    margin: 12px 0; color: #999; font-size: 12px;
+  }
+  .or-divider::before, .or-divider::after {
+    content: ''; flex: 1; height: 1px; background: #e0e5ec;
+  }
+
+  /* ── Buttons ── */
+  .btn-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 6px; }
+  button {
+    padding: 10px 20px;
+    border-radius: 5px;
+    border: none;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    transition: opacity 0.15s, transform 0.1s;
+  }
+  button:active { transform: scale(0.97); }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+
+  .btn-primary { background: #70AD47; color: #fff; }
+  .btn-primary:hover:not(:disabled) { background: #5d9939; }
+  .btn-secondary { background: #1a1a2e; color: #fff; }
+  .btn-secondary:hover:not(:disabled) { background: #2e2e50; }
+  .btn-ghost { background: #fff; color: #555; border: 1px solid #ccc; }
+  .btn-ghost:hover:not(:disabled) { background: #f5f5f5; }
+
+  /* ── Status ── */
+  #status {
+    padding: 10px 14px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    display: none;
+    margin-top: 4px;
+  }
+  #status.info    { background: #e8f4fd; color: #1565c0; border-left: 3px solid #1565c0; display: block; }
+  #status.success { background: #eaf5e1; color: #2e7d32; border-left: 3px solid #70AD47; display: block; }
+  #status.error   { background: #fdecea; color: #c62828; border-left: 3px solid #e53935; display: block; }
+
+  /* ── Summary cards ── */
+  .summary-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px;
+    margin-bottom: 18px;
+  }
+  .summary-card {
+    background: #fff;
+    border: 1px solid #dde2ea;
+    border-radius: 8px;
+    padding: 14px 16px;
+    text-align: center;
+  }
+  .summary-card .num { font-size: 28px; font-weight: 700; color: #70AD47; }
+  .summary-card .lbl { font-size: 11px; color: #888; margin-top: 3px; text-transform: uppercase; letter-spacing: 0.5px; }
+
+  /* ── Preview table ── */
+  .preview-wrap { overflow-x: auto; border: 1px solid #dde2ea; border-radius: 6px; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  thead tr { background: #70AD47; color: #fff; }
+  th { padding: 9px 12px; text-align: left; white-space: nowrap; font-weight: 600; }
+  td { padding: 7px 12px; border-bottom: 1px solid #eef0f4; vertical-align: top; word-break: break-word; }
+  tr:last-child td { border-bottom: none; }
+  tr:nth-child(even) td { background: #fafbfc; }
+  tr:hover td { background: #f0f7ea; }
+
+  /* ── Rule pills ── */
+  .rule-pill {
+    display: inline-block;
+    background: #e8f4fd; color: #1565c0;
+    border-radius: 10px; padding: 2px 8px;
+    font-size: 11px; white-space: nowrap;
+  }
+
+  /* ── Progress bar ── */
+  .progress-bar {
+    height: 4px; background: #e0e5ec; border-radius: 2px;
+    overflow: hidden; margin-top: 8px; display: none;
+  }
+  .progress-fill {
+    height: 100%; background: #70AD47;
+    border-radius: 2px; transition: width 0.3s;
+  }
+
+  /* ── Hidden ── */
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-icon">🛡</div>
+  <div>
+    <h1>WAF Report Generator</h1>
+    <p>Append daily WAF log data into your existing Excel report</p>
+  </div>
+</div>
+
+<div class="main">
+
+  <!-- Step 1: Upload existing Excel -->
+  <div class="card">
+    <div class="card-title"><span class="step">1</span> Upload existing WAF_Report.xlsx <span style="color:#999;font-size:11px;font-weight:400;margin-left:4px">(optional — skip if starting fresh)</span></div>
+    <div class="upload-zone" id="xlsxZone">
+      <input type="file" id="xlsxFile" accept=".xlsx,.xls">
+      <div class="upload-icon">📊</div>
+      <p><strong>Click to browse</strong> or drag and drop your WAF_Report.xlsx here</p>
+      <p style="margin-top:4px;font-size:11px;color:#aaa">Existing ConsolidationSheet data will be preserved — new rows appended</p>
+    </div>
+    <div id="xlsxBadge" class="hidden" style="margin-top:10px"></div>
+  </div>
+
+  <!-- Step 2: Raw data input -->
+  <div class="card">
+    <div class="card-title"><span class="step">2</span> Paste raw WAF log data</div>
+    <textarea id="rawData" placeholder="Paste your pipe-delimited WAF log here...
+Example first line:
+timestamp|terminatingRuleId|action|httpSourceName|httpSourceId|ruleGroupId|ruleId|clientIp|country|PLMUsername|Host|uri|args|httpVersion|httpMethod
+2026-07-25 01:46:38|AWS-AWSManagedRulesCommonRuleSet|BLOCK|ALB|...|AWS#AWSManagedRulesCommonRuleSet|SizeRestrictions_URIPATH|..."></textarea>
+
+    <div class="or-divider">OR</div>
+
+    <div class="upload-zone" id="txtZone" style="padding:14px">
+      <input type="file" id="txtFile" accept=".txt,.csv,.log">
+      <div style="font-size:20px;margin-bottom:4px">📄</div>
+      <p><strong>Upload raw .txt file</strong> instead of pasting</p>
+    </div>
+    <div id="txtBadge" class="hidden" style="margin-top:10px"></div>
+  </div>
+
+  <!-- Actions -->
+  <div class="card" style="padding:18px 24px">
+    <div class="btn-row">
+      <button class="btn-primary" onclick="processAndDownload()" id="btnGenerate">⬇ Generate &amp; Download Excel</button>
+      <button class="btn-ghost" onclick="previewOnly()" id="btnPreview">👁 Preview first 50 rows</button>
+      <button class="btn-ghost" onclick="clearAll()">✕ Clear all</button>
+    </div>
+    <div class="progress-bar" id="progressBar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
+  </div>
+
+  <div id="status"></div>
+
+  <!-- Preview output -->
+  <div id="previewSection" class="hidden">
+    <div class="summary-grid" id="summaryGrid"></div>
+    <div class="card" style="padding:16px 20px">
+      <div class="card-title" style="margin-bottom:12px">Preview — ConsolidationSheet <span style="color:#aaa;font-size:11px;font-weight:400">(first 50 rows of new data)</span></div>
+      <div class="preview-wrap">
+        <table id="previewTable"></table>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /main -->
+
+<script>
+// ── Constants ──────────────────────────────────────────────────────────────
+const HEADERS      = ["Date", "Rule Set", "Rule", "URI", "Args"];
+const GREEN_HEADER = "FF70AD47";
+const GREEN_PIVOT  = "FF00B050";
+const BLACK        = "FF000000";
+const COL_WIDTHS   = [18.43, 32.00, 36.00, 33.71, 58.14];
+
+const IDX_TS  = 0, IDX_RG = 5, IDX_RI = 6, IDX_URI = 11, IDX_ARG = 12;
+
+const EXPECTED_HDR =
+  "timestamp|terminatingRuleId|action|httpSourceName|httpSourceId|" +
+  "ruleGroupId|ruleId|clientIp|country|PLMUsername|Host|uri|args|" +
+  "httpVersion|httpMethod";
+
+// ── State ──────────────────────────────────────────────────────────────────
+let existingWb    = null;   // XLSX workbook object from uploaded file
+let existingFname = "WAF_Report.xlsx";
+
+// ── File upload handlers ───────────────────────────────────────────────────
+document.getElementById("xlsxFile").addEventListener("change", async e => {
+  const file = e.target.files[0]; if (!file) return;
+  existingFname = file.name;
+  const buf  = await file.arrayBuffer();
+  existingWb = XLSX.read(buf, { type: "array", cellDates: true, cellStyles: true });
+  showBadge("xlsxBadge", "📊", file.name, () => { existingWb = null; hideBadge("xlsxBadge"); });
+  setStatus(`Loaded: ${file.name} (${existingWb.SheetNames.length} sheets)`, "success");
+});
+
+document.getElementById("txtFile").addEventListener("change", async e => {
+  const file = e.target.files[0]; if (!file) return;
+  const text = await file.text();
+  document.getElementById("rawData").value = text;
+  showBadge("txtBadge", "📄", file.name, () => {
+    document.getElementById("rawData").value = "";
+    document.getElementById("txtFile").value = "";
+    hideBadge("txtBadge");
+  });
+});
+
+// drag-over highlight
+["xlsxZone","txtZone"].forEach(id => {
+  const z = document.getElementById(id);
+  z.addEventListener("dragover",  e => { e.preventDefault(); z.classList.add("drag-over"); });
+  z.addEventListener("dragleave", () => z.classList.remove("drag-over"));
+  z.addEventListener("drop",      e => z.classList.remove("drag-over"));
+});
+
+function showBadge(id, icon, name, onRemove) {
+  const el = document.getElementById(id);
+  el.innerHTML = `<span class="file-badge">${icon} ${escHtml(name)} <span class="remove" title="Remove">×</span></span>`;
+  el.classList.remove("hidden");
+  el.querySelector(".remove").onclick = onRemove;
+}
+function hideBadge(id) { document.getElementById(id).classList.add("hidden"); }
+
+// ── Raw data parser ────────────────────────────────────────────────────────
+function parseRaw(text) {
+  const lines = text.replace(/\r\n?/g, "\n").split("\n");
+  const rows  = [];
+
+  for (const line of lines) {
+    const l = line.trim();
+    if (!l || !l.includes("|")) continue;
+    const parts = l.split("|");
+    if (parts.length < 13) continue;
+    if (parts[IDX_TS].trim() === "timestamp") continue; // header row
+
+    const ts = parseTimestamp(parts[IDX_TS].trim());
+    if (!ts) continue;
+
+    let rgRaw = parts[IDX_RG].trim().replace(/AWS#AWS/gi, "AWS");
+    let riRaw = parts[IDX_RI].trim().replace(/AWS#AWS/gi, "AWS");
+    let uri   = parts[IDX_URI].trim();
+    let args  = parts.length > IDX_ARG ? parts[IDX_ARG].trim() : "";
+
+    if (uri.startsWith("="))  uri  = "'" + uri;
+    if (args.startsWith("=")) args = "'" + args;
+
+    const rgList = rgRaw.split(";").map(v => v.trim()).filter(Boolean);
+    const riList = riRaw.split(";").map(v => v.trim()).filter(Boolean);
+    const pairs  = Math.max(rgList.length, riList.length, 1);
+
+    for (let p = 0; p < pairs; p++) {
+      const rg = rgList[p] || "";
+      const ri = (riList[p] || "").substring(0, 31);
+      if (rg || ri) rows.push({ ts, rg, ri, uri, args });
+    }
+  }
+  return rows;
+}
+
+function parseTimestamp(s) {
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})/);
+  if (!m) return null;
+  return new Date(+m[1], +m[2]-1, +m[3], +m[4], +m[5], +m[6]);
+}
+
+function formatDate(d) {
+  const pad = n => String(n).padStart(2,"0");
+  return `${pad(d.getDate())}/${pad(d.getMonth()+1)}/${String(d.getFullYear()).slice(-2)} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+// ── Duplicate check ────────────────────────────────────────────────────────
+function buildExistingSet(ws) {
+  const set = new Set();
+  if (!ws) return set;
+  const data = XLSX.utils.sheet_to_json(ws, { header:1, raw:false });
+  for (let i = 1; i < data.length; i++) {
+    set.add((data[i] || []).join("|"));
+  }
+  return set;
+}
+
+// ── Main: process + download ───────────────────────────────────────────────
+async function processAndDownload() {
+  const rawText = document.getElementById("rawData").value.trim();
+  if (!rawText) { setStatus("Paste your raw WAF log data first.", "error"); return; }
+
+  setStatus("Parsing raw data…", "info");
+  setProgress(10);
+
+  const newRows = parseRaw(rawText);
+  if (!newRows.length) { setStatus("No valid rows found. Check the format.", "error"); setProgress(0); return; }
+
+  setStatus(`Parsed ${newRows.length} rows. Building Excel file…`, "info");
+  setProgress(30);
+
+  // Build or clone workbook
+  let wb;
+  if (existingWb) {
+    // clone by re-reading (XLSX objects aren't deep-cloneable easily)
+    wb = existingWb;
+  } else {
+    wb = XLSX.utils.book_new();
+  }
+
+  setProgress(50);
+  appendToConsolidation(wb, newRows);
+  setProgress(75);
+  syncRuleSheets(wb);
+  setProgress(90);
+
+  // Download
+  const fname = existingFname.replace(/\.xlsx?$/i, "") + "_updated.xlsx";
+  XLSX.writeFile(wb, fname);
+
+  setProgress(100);
+  setStatus(`✅ Done — ${newRows.length} rows processed. Download started: ${fname}`, "success");
+  setTimeout(() => setProgress(0), 2000);
+}
+
+// ── Preview only ───────────────────────────────────────────────────────────
+function previewOnly() {
+  const rawText = document.getElementById("rawData").value.trim();
+  if (!rawText) { setStatus("Paste your raw WAF log data first.", "error"); return; }
+
+  const newRows = parseRaw(rawText);
+  if (!newRows.length) { setStatus("No valid rows found.", "error"); return; }
+
+  renderSummary(newRows);
+  renderPreviewTable(newRows.slice(0, 50));
+  document.getElementById("previewSection").classList.remove("hidden");
+  setStatus(`Preview: showing first 50 of ${newRows.length} parsed rows.`, "info");
+}
+
+// ── ConsolidationSheet ─────────────────────────────────────────────────────
+function appendToConsolidation(wb, newRows) {
+  let ws = wb.Sheets["ConsolidationSheet"];
+  let existingSet = new Set();
+  let nextRow = 2; // 1-indexed, row 1 = header
+
+  if (ws) {
+    existingSet = buildExistingSet(ws);
+    const range = XLSX.utils.decode_range(ws["!ref"] || "A1");
+    nextRow = range.e.r + 2; // after last row
+  } else {
+    ws = XLSX.utils.aoa_to_sheet([HEADERS]);
+    applyHeaderStyle(ws, 1, HEADERS.length);
+    setColWidths(ws);
+    XLSX.utils.book_append_sheet(wb, ws, "ConsolidationSheet");
+  }
+
+  let added = 0;
+  for (const row of newRows) {
+    const dateStr = formatDate(row.ts);
+    const key     = [dateStr, row.rg, row.ri, row.uri, row.args].join("|");
+    if (existingSet.has(key)) continue;
+    existingSet.add(key);
+
+    const r = nextRow - 1; // 0-indexed
+    setCellVal(ws, r, 0, dateStr);
+    setCellVal(ws, r, 1, row.rg);
+    setCellVal(ws, r, 2, row.ri);
+    setCellVal(ws, r, 3, row.uri);
+    setCellVal(ws, r, 4, row.args || "");
+    applyRowStyle(ws, r, HEADERS.length);
+
+    nextRow++; added++;
+  }
+
+  // Update sheet range
+  const lastRow = nextRow - 1;
+  ws["!ref"] = XLSX.utils.encode_range({ s:{r:0,c:0}, e:{r:lastRow-1,c:4} });
+  setColWidths(ws);
+  return added;
+}
+
+// ── RuleSheets sync ────────────────────────────────────────────────────────
+function syncRuleSheets(wb) {
+  const ws = wb.Sheets["ConsolidationSheet"];
+  if (!ws) return;
+
+  const allRows = XLSX.utils.sheet_to_json(ws, { header:1, raw:false }).slice(1);
+
+  // Group by rule
+  const groups = {};
+  for (const row of allRows) {
+    const rule = (row[2] || "").trim().replace(/[\[\]\*\?\/\:]/g,"").substring(0,31);
+    if (!rule) continue;
+    if (!groups[rule]) groups[rule] = [];
+    groups[rule].push(row);
+  }
+
+  for (const [ruleName, rows] of Object.entries(groups)) {
+    let ruleWs = wb.Sheets[ruleName];
+    let existingSet = new Set();
+    let nextRow = 2;
+
+    if (ruleWs) {
+      existingSet = buildExistingSet(ruleWs);
+      const range = XLSX.utils.decode_range(ruleWs["!ref"] || "A1");
+      nextRow = range.e.r + 2;
+    } else {
+      ruleWs = XLSX.utils.aoa_to_sheet([HEADERS]);
+      applyHeaderStyle(ruleWs, 1, HEADERS.length);
+      setColWidths(ruleWs);
+      XLSX.utils.book_append_sheet(wb, ruleWs, ruleName);
+    }
+
+    for (const row of rows) {
+      const key = (row || []).join("|");
+      if (existingSet.has(key)) continue;
+      existingSet.add(key);
+
+      const r = nextRow - 1;
+      for (let c = 0; c < 5; c++) {
+        setCellVal(ruleWs, r, c, row[c] || "");
+      }
+      applyRowStyle(ruleWs, r, HEADERS.length);
+      nextRow++;
+    }
+
+    const lastRow = nextRow - 1;
+    ruleWs["!ref"] = XLSX.utils.encode_range({ s:{r:0,c:0}, e:{r:lastRow-1,c:4} });
+    setColWidths(ruleWs);
+  }
+}
+
+// ── XLSX cell helpers ──────────────────────────────────────────────────────
+function setCellVal(ws, r, c, val) {
+  const addr = XLSX.utils.encode_cell({ r, c });
+  ws[addr] = { t:"s", v: String(val ?? "") };
+}
+
+function applyHeaderStyle(ws, rowCount, colCount) {
+  for (let c = 0; c < colCount; c++) {
+    const addr = XLSX.utils.encode_cell({ r:0, c });
+    if (!ws[addr]) ws[addr] = { t:"s", v: HEADERS[c] };
+    ws[addr].s = {
+      fill:  { patternType:"solid", fgColor:{ rgb:"70AD47" } },
+      font:  { bold:true, color:{ rgb:"000000" } },
+      alignment: { horizontal:"center", vertical:"center", wrapText:true },
+      border: thinBorderStyle()
+    };
+  }
+}
+
+function applyRowStyle(ws, r, colCount) {
+  for (let c = 0; c < colCount; c++) {
+    const addr = XLSX.utils.encode_cell({ r, c });
+    if (!ws[addr]) ws[addr] = { t:"s", v:"" };
+    ws[addr].s = {
+      alignment: { wrapText:true, vertical:"bottom" },
+      border: thinBorderStyle()
+    };
+  }
+}
+
+function thinBorderStyle() {
+  const side = { style:"thin", color:{ rgb:"000000" } };
+  return { top:side, bottom:side, left:side, right:side };
+}
+
+function setColWidths(ws) {
+  ws["!cols"] = COL_WIDTHS.map(w => ({ wch: w }));
+}
+
+// ── Preview render ─────────────────────────────────────────────────────────
+function renderSummary(rows) {
+  const rules  = new Set(rows.map(r => r.ri).filter(Boolean));
+  const dates  = new Set(rows.map(r => formatDate(r.ts).substring(0,8)));
+  const rsets  = new Set(rows.map(r => r.rg).filter(Boolean));
+
+  document.getElementById("summaryGrid").innerHTML = `
+    <div class="summary-card"><div class="num">${rows.length}</div><div class="lbl">Total Rows</div></div>
+    <div class="summary-card"><div class="num">${dates.size}</div><div class="lbl">Unique Dates</div></div>
+    <div class="summary-card"><div class="num">${rsets.size}</div><div class="lbl">Rule Sets</div></div>
+    <div class="summary-card"><div class="num">${rules.size}</div><div class="lbl">Unique Rules</div></div>
+  `;
+}
+
+function renderPreviewTable(rows) {
+  const table = document.getElementById("previewTable");
+  let h = `<thead><tr>${HEADERS.map(hh=>`<th>${escHtml(hh)}</th>`).join("")}</tr></thead><tbody>`;
+  for (const row of rows) {
+    h += `<tr>
+      <td>${escHtml(formatDate(row.ts))}</td>
+      <td>${escHtml(row.rg)}</td>
+      <td><span class="rule-pill">${escHtml(row.ri)}</span></td>
+      <td>${escHtml(row.uri)}</td>
+      <td>${escHtml(row.args)}</td>
+    </tr>`;
+  }
+  h += "</tbody>";
+  table.innerHTML = h;
+}
+
+// ── UI helpers ─────────────────────────────────────────────────────────────
+function setStatus(msg, type="info") {
+  const el = document.getElementById("status");
+  el.textContent = msg;
+  el.className = type;
+}
+
+function setProgress(pct) {
+  const bar  = document.getElementById("progressBar");
+  const fill = document.getElementById("progressFill");
+  if (pct > 0) { bar.style.display = "block"; fill.style.width = pct + "%"; }
+  else         { bar.style.display = "none";  fill.style.width = "0%"; }
+}
+
+function clearAll() {
+  document.getElementById("rawData").value = "";
+  document.getElementById("xlsxFile").value = "";
+  document.getElementById("txtFile").value = "";
+  document.getElementById("status").className = "";
+  document.getElementById("status").textContent = "";
+  document.getElementById("previewSection").classList.add("hidden");
+  document.getElementById("xlsxBadge").classList.add("hidden");
+  document.getElementById("txtBadge").classList.add("hidden");
+  existingWb    = null;
+  existingFname = "WAF_Report.xlsx";
+  setProgress(0);
+}
+
+function escHtml(v) {
+  return String(v ?? "")
+    .replace(/&/g,"&amp;").replace(/</g,"&lt;")
+    .replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+</script>
+</body>
+</html>
