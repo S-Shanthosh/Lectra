@@ -217,6 +217,36 @@
 
   /* ── Hidden ── */
   .hidden { display: none !important; }
+
+  /* ── Log panel ── */
+  .log-panel {
+    background: #1a1a2e;
+    border-radius: 8px;
+    padding: 18px 20px;
+    margin-bottom: 18px;
+    font-family: Consolas, 'Courier New', monospace;
+    font-size: 12.5px;
+    line-height: 1.8;
+    max-height: 420px;
+    overflow-y: auto;
+  }
+  .log-panel .log-title {
+    color: #70AD47;
+    font-weight: 700;
+    font-size: 13px;
+    margin-bottom: 10px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+  .log-line { margin: 0; white-space: pre-wrap; }
+  .log-section  { color: #70AD47; font-weight: 700; }
+  .log-info     { color: #90caf9; }
+  .log-success  { color: #a5d6a7; }
+  .log-warn     { color: #ffe082; }
+  .log-new      { color: #80deea; }
+  .log-skip     { color: #888; }
+  .log-done     { color: #70AD47; font-weight: 700; }
+  .log-num      { color: #ff8a65; font-weight: 700; }
 </style>
 </head>
 <body>
@@ -272,6 +302,10 @@ timestamp|terminatingRuleId|action|httpSourceName|httpSourceId|ruleGroupId|ruleI
   </div>
 
   <div id="status"></div>
+  <div id="logPanel" class="log-panel hidden">
+    <div class="log-title">📋 Processing Log</div>
+    <div id="logLines"></div>
+  </div>
 
   <!-- Preview output -->
   <div id="previewSection" class="hidden">
@@ -509,6 +543,7 @@ function appendToConsolidation(workbook, newRows) {
     });
   }
 
+  const existingCount = existingSet.size;
   const firstNewRow = ws.rowCount + 1;
   let added = 0;
   for (const row of newRows) {
@@ -520,7 +555,7 @@ function appendToConsolidation(workbook, newRows) {
   }
 
   if (added > 0) styleNewRows(ws, firstNewRow);
-  return added;
+  return { added, existingCount };
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -542,7 +577,7 @@ function syncRuleSheets(workbook) {
     groups.get(sheetName).push(vals);
   });
 
-  let totalAdded = 0;
+  const sheetLog = {};
   for (const [sheetName, rows] of groups) {
     let ruleWs = workbook.getWorksheet(sheetName);
     const existingSet = new Set();
@@ -569,9 +604,9 @@ function syncRuleSheets(workbook) {
     }
 
     if (added > 0) styleNewRows(ruleWs, firstNewRow);
-    totalAdded += added;
+    sheetLog[sheetName] = added;
   }
-  return totalAdded;
+  return { total: groups.size, sheets: sheetLog };
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -581,26 +616,48 @@ async function processAndDownload() {
   const rawText = document.getElementById("rawData").value.trim();
   if (!rawText) { setStatus("Paste your raw WAF log data first.", "error"); return; }
 
-  setStatus("Parsing raw data…", "info");
+  logClear();
+  setStatus("Processing…", "info");
   setProgress(10);
+
+  // ── DailyReport ──
+  logSection("=== DailyReport ===");
+  const rawLines = rawText.replace(/\r\n?/g,"\n").split("\n")
+    .filter(l => l.trim() && l.includes("|") && !l.trim().startsWith("timestamp"));
+  logInfo(`Raw input lines: ${rawLines.length}`);
 
   const newRows = parseRaw(rawText);
   if (!newRows.length) { setStatus("No valid rows found. Check the format.", "error"); setProgress(0); return; }
+  logInfo(`Parsed ${newRows.length} rows (after semicolon rule expansion from ${rawLines.length} raw lines)`);
 
-  setStatus(`Parsed ${newRows.length} rows. Building Excel file…`, "info");
   setProgress(25);
-
   const workbook = new ExcelJS.Workbook();
   if (existingBuffer) {
     await workbook.xlsx.load(existingBuffer);
+    logInfo(`Opened: ${existingFname}`);
+  } else {
+    logInfo("No existing file — creating fresh workbook.");
   }
 
   setProgress(45);
-  const added = appendToConsolidation(workbook, newRows);
-  setProgress(70);
-  const ruleAdded = syncRuleSheets(workbook);
-  setProgress(85);
+  const { added, existingCount } = appendToConsolidation(workbook, newRows);
+  if (existingCount > 0) logInfo(`ConsolidationSheet has ${existingCount} existing rows — appending.`);
+  logSuccess(`Added ${added} new rows to ConsolidationSheet.`);
 
+  // ── CreateRuleSheets ──
+  setProgress(70);
+  logSection("=== CreateRuleSheets ===");
+  const ruleLog = syncRuleSheets(workbook);
+  logInfo(`${ruleLog.total} unique rules in ConsolidationSheet.`);
+  let totalRuleAdded = 0;
+  for (const [name, count] of Object.entries(ruleLog.sheets)) {
+    if (count > 0) { logNew(`[${name}] +${count} new`); totalRuleAdded += count; }
+    else           { logSkip(`[${name}] already up to date`); }
+  }
+  logInfo(`Total new rows added across all rule sheets: ${totalRuleAdded}`);
+
+  // ── Download ──
+  setProgress(85);
   const buf = await workbook.xlsx.writeBuffer();
   const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
   const fname = existingFname.replace(/\.xlsx?$/i, "") + "_updated.xlsx";
@@ -611,7 +668,8 @@ async function processAndDownload() {
   URL.revokeObjectURL(url);
 
   setProgress(100);
-  setStatus(`✅ Done — ${added} new row(s) added to ConsolidationSheet, ${ruleAdded} across rule sheets. Download started: ${fname}`, "success");
+  logDone(`Done. Saved → ${fname}`);
+  setStatus(`✅ Done — ${rawLines.length} raw lines → ${newRows.length} parsed rows → ${added} added to ConsolidationSheet. Download started: ${fname}`, "success");
   setTimeout(() => setProgress(0), 2000);
 }
 
@@ -686,6 +744,35 @@ function clearAll() {
   existingFname  = "WAF_Report.xlsx";
   setProgress(0);
 }
+
+// ── Log panel helpers ─────────────────────────────────────────────────────
+function logClear() {
+  document.getElementById("logLines").innerHTML = "";
+  document.getElementById("logPanel").classList.remove("hidden");
+}
+
+function logLine(text, cls="log-info") {
+  const el = document.getElementById("logLines");
+  const p  = document.createElement("p");
+  p.className = "log-line";
+
+  // Highlight numbers in orange
+  const escaped = escHtml(text).replace(
+    /\b(\d+)\b/g,
+    '<span class="log-num">$1</span>'
+  );
+  p.innerHTML = `<span class="${cls}">${escaped}</span>`;
+  el.appendChild(p);
+  // auto-scroll
+  document.getElementById("logPanel").scrollTop = 99999;
+}
+
+function logSection(title) { logLine(title, "log-section"); }
+function logInfo(text)     { logLine("  " + text, "log-info"); }
+function logSuccess(text)  { logLine("  " + text, "log-success"); }
+function logNew(text)      { logLine("  " + text, "log-new"); }
+function logSkip(text)     { logLine("  " + text, "log-skip"); }
+function logDone(text)     { logLine(text, "log-done"); }
 
 function escHtml(v) {
   return String(v ?? "")
