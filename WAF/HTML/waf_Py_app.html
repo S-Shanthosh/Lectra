@@ -1,0 +1,708 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WAF Report Engine</title>
+<script src="https://cdn.jsdelivr.net/pyodide/v0.26.3/full/pyodide.js"></script>
+<style>
+  :root{
+    --navy:#1a1a2e;
+    --navy-light:#242444;
+    --green:#70AD47;
+    --green-dark:#598c38;
+    --bg:#f0f2f5;
+    --card:#ffffff;
+    --border:#dde2ea;
+    --text:#1a1a2e;
+    --muted:#5a5f73;
+    --term-bg:#0d1117;
+    --term-green:#5fd97a;
+  }
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+  body{
+    font-family:'Segoe UI',Arial,sans-serif;
+    background:var(--bg);
+    color:var(--text);
+    min-height:100vh;
+  }
+  .header{
+    background:var(--navy);
+    color:#fff;
+    padding:18px 32px;
+    display:flex;
+    align-items:center;
+    gap:14px;
+    border-bottom:3px solid var(--green);
+  }
+  .header-icon{
+    width:36px;height:36px;
+    background:var(--green);
+    border-radius:6px;
+    display:flex;align-items:center;justify-content:center;
+    font-size:18px;
+    flex-shrink:0;
+  }
+  .header h1{font-size:18px;font-weight:600;letter-spacing:.3px;}
+  .header p{font-size:12px;color:#aab;margin-top:2px;}
+
+  .banner{
+    max-width:1000px;margin:20px auto 0;padding:0 20px;
+  }
+  .banner-box{
+    background:#eaf5e4;
+    border:1px solid #c3e2b3;
+    border-left:4px solid var(--green-dark);
+    border-radius:6px;
+    padding:12px 16px;
+    font-size:13px;
+    line-height:1.5;
+    color:#2c4a1e;
+  }
+  .banner-box strong{color:var(--green-dark);}
+
+  .main{max-width:1000px;margin:0 auto;padding:20px 20px 60px;}
+
+  .card{
+    background:var(--card);
+    border:1px solid var(--border);
+    border-radius:8px;
+    padding:22px 24px;
+    margin-bottom:18px;
+  }
+  .card-title{
+    font-size:13px;font-weight:700;text-transform:uppercase;
+    letter-spacing:.8px;color:#555;margin-bottom:14px;
+    display:flex;align-items:center;gap:8px;
+  }
+  .card-title span.step{
+    background:var(--navy);color:#fff;border-radius:50%;
+    width:20px;height:20px;font-size:11px;
+    display:inline-flex;align-items:center;justify-content:center;
+    flex-shrink:0;
+  }
+  .card-desc{font-size:13px;color:var(--muted);margin-bottom:14px;line-height:1.5;}
+
+  textarea{
+    width:100%;min-height:160px;
+    font-family:'Consolas','Courier New',monospace;
+    font-size:12.5px;line-height:1.5;
+    border:1px solid var(--border);border-radius:6px;
+    padding:12px;resize:vertical;
+    background:#fafbfc;color:var(--text);
+  }
+  textarea:focus{outline:2px solid var(--green);outline-offset:-1px;border-color:var(--green);}
+
+  .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;}
+  .row + .row{margin-top:12px;}
+
+  input[type="file"]{
+    font-size:13px;
+    padding:8px;
+    border:1px dashed var(--border);
+    border-radius:6px;
+    background:#fafbfc;
+    flex:1;
+    min-width:220px;
+  }
+
+  .file-status{font-size:12.5px;color:var(--muted);}
+  .file-status.loaded{color:var(--green-dark);font-weight:600;}
+
+  label.check{
+    display:flex;align-items:center;gap:8px;
+    font-size:13px;color:var(--text);cursor:pointer;
+  }
+  label.check input{width:16px;height:16px;accent-color:var(--green-dark);}
+
+  .warn{
+    font-size:12px;color:#8a5a10;background:#fff6e6;
+    border:1px solid #f0d9a6;border-radius:5px;
+    padding:8px 10px;margin-top:8px;display:none;
+  }
+  .warn.show{display:block;}
+
+  button{
+    font-size:13.5px;font-weight:600;
+    padding:10px 20px;border-radius:6px;border:none;
+    cursor:pointer;
+    display:inline-flex;align-items:center;gap:8px;
+    transition:opacity .15s ease, transform .1s ease;
+  }
+  button:disabled{opacity:.5;cursor:not-allowed;}
+  button:not(:disabled):active{transform:scale(.98);}
+  .btn-primary{background:var(--green);color:#0d1a08;}
+  .btn-primary:not(:disabled):hover{background:var(--green-dark);color:#fff;}
+  .btn-secondary{background:#eef0f4;color:var(--text);}
+  .btn-secondary:not(:disabled):hover{background:#e2e5eb;}
+  .btn-download{background:var(--navy);color:#fff;text-decoration:none;display:none;}
+  .btn-download:hover{background:var(--navy-light);}
+
+  .status-line{
+    font-size:12.5px;color:var(--muted);margin-top:10px;
+    display:flex;align-items:center;gap:8px;min-height:18px;
+  }
+  .spinner{
+    width:13px;height:13px;border-radius:50%;
+    border:2px solid #d5d9e0;border-top-color:var(--green-dark);
+    animation:spin .7s linear infinite;display:none;
+  }
+  .spinner.show{display:inline-block;}
+  @keyframes spin{to{transform:rotate(360deg);}}
+
+  .terminal{
+    background:var(--term-bg);
+    border-radius:8px;
+    padding:16px 18px;
+    font-family:'Consolas','Courier New',monospace;
+    font-size:12.5px;line-height:1.6;
+    color:var(--term-green);
+    max-height:340px;overflow-y:auto;
+    white-space:pre-wrap;word-break:break-word;
+  }
+  .terminal .prompt{color:#7fa8ff;}
+  .terminal-empty{color:#5c6370;font-style:italic;}
+
+  .foot-note{
+    font-size:12px;color:var(--muted);text-align:center;
+    margin-top:8px;line-height:1.6;
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-icon">🛡️</div>
+  <div>
+    <h1>WAF Report Engine</h1>
+    <p>Runs entirely in this browser tab</p>
+  </div>
+</div>
+
+<div class="banner">
+  <div class="banner-box">
+    <strong>WAF Report Generator</strong> 
+  </div>
+</div>
+
+<div class="main">
+
+  <!-- STEP 1: Load existing report -->
+  <div class="card">
+    <div class="card-title"><span class="step">1</span>Continue a previous report (optional)</div>
+    <div class="card-desc">Load your existing <code>WAF_Report.xlsx</code> to append to it. This is a local file read only — skip this step to start a brand new workbook.</div>
+    <div class="row">
+      <input type="file" id="fileInput" accept=".xlsx">
+      <button class="btn-secondary" id="clearFileBtn" style="display:none;">Start fresh instead</button>
+    </div>
+    <div class="file-status" id="fileStatus">No file loaded — will create a new workbook.</div>
+  </div>
+
+  <!-- STEP 2: Paste raw data -->
+  <div class="card">
+    <div class="card-title"><span class="step">2</span>Paste raw WAF log data</div>
+    <div class="card-desc">Copy the pipe-delimited export and paste it below (header row optional, one entry per line). Leave empty if you only want to re-sync rule sheets or run the monthly pivot.</div>
+    <textarea id="rawInput" placeholder="timestamp|terminatingRuleId|action|httpSourceName|httpSourceId|ruleGroupId|ruleId|clientIp|country|PLMUsername|Host|uri|args|httpVersion|httpMethod
+2026-08-29 09:14:02|...|BLOCK|...|...|AWS#AWSManagedRulesCommonRuleSet|AWS#SizeRestrictions_BODY|...|...|...|example.com|/checkout|q=1|HTTP/1.1|POST"></textarea>
+  </div>
+
+  <!-- STEP 3: Run -->
+  <div class="card">
+    <div class="card-title"><span class="step">3</span>Process</div>
+    <label class="check">
+      <input type="checkbox" id="monthlyCheck">
+      Also generate the monthly pivot report
+    </label>
+    <div class="warn" id="monthlyWarn">This renames <code>ConsolidationSheet</code> to <code>ConsolidationSheet-old</code> and builds a fresh pivot — only run this at month-end, not on every daily update.</div>
+
+    <div class="row" style="margin-top:16px;">
+      <button class="btn-primary" id="runBtn" disabled>Loading Python engine…</button>
+      <a class="btn-download" id="downloadBtn" download="WAF_Report.xlsx">⬇ Download WAF_Report.xlsx</a>
+    </div>
+    <div class="status-line"><span class="spinner" id="spinner"></span><span id="statusText">Starting up…</span></div>
+  </div>
+
+  <!-- LOG -->
+  <div class="card">
+    <div class="card-title"><span class="step">✓</span>Log</div>
+    <div class="terminal" id="terminal"><span class="terminal-empty">Output will appear here once you run the engine.</span></div>
+  </div>
+
+  <div class="foot-note">Engine ported directly from Waf.py — same parsing, deduping, and styling rules as the desktop script.</div>
+</div>
+
+<script>
+let pyodide = null;
+let hasExisting = false;
+
+const fileInput   = document.getElementById('fileInput');
+const clearFileBtn= document.getElementById('clearFileBtn');
+const fileStatus  = document.getElementById('fileStatus');
+const rawInput    = document.getElementById('rawInput');
+const monthlyCheck= document.getElementById('monthlyCheck');
+const monthlyWarn = document.getElementById('monthlyWarn');
+const runBtn      = document.getElementById('runBtn');
+const downloadBtn = document.getElementById('downloadBtn');
+const statusText  = document.getElementById('statusText');
+const spinner     = document.getElementById('spinner');
+const terminal    = document.getElementById('terminal');
+
+monthlyCheck.addEventListener('change', () => {
+  monthlyWarn.classList.toggle('show', monthlyCheck.checked);
+});
+
+function setStatus(msg, busy) {
+  statusText.textContent = msg;
+  spinner.classList.toggle('show', !!busy);
+}
+
+function logAppend(text) {
+  if (terminal.querySelector('.terminal-empty')) terminal.innerHTML = '';
+  const span = document.createElement('div');
+  span.textContent = text;
+  terminal.appendChild(span);
+  terminal.scrollTop = terminal.scrollHeight;
+}
+
+const PY_ENGINE = `
+import io, os, re, math, contextlib
+from collections import defaultdict
+from datetime import datetime, timedelta
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+
+GREEN_HEADER = "70AD47"
+GREEN_PIVOT  = "00B050"
+BLACK        = "000000"
+
+COL_WIDTHS = {"A": 18.43, "B": 32.00, "C": 36.00, "D": 33.71, "E": 58.14}
+HEADERS = ["Date", "Rule Set", "Rule", "URI", "Args"]
+
+IDX_TS, IDX_RG, IDX_RI, IDX_URI, IDX_ARG = 0, 5, 6, 11, 12
+
+
+def thin_border():
+    s = Side(style="thin", color=BLACK)
+    return Border(left=s, right=s, top=s, bottom=s)
+
+
+def style_header_row(ws):
+    fill = PatternFill("solid", fgColor=GREEN_HEADER)
+    font = Font(bold=True, color=BLACK)
+    align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    b = thin_border()
+    for col_idx, col_letter in enumerate("ABCDE", 1):
+        cell = ws.cell(row=1, column=col_idx)
+        cell.value = HEADERS[col_idx - 1]
+        cell.fill = fill
+        cell.font = font
+        cell.alignment = align
+        cell.border = b
+        ws.column_dimensions[col_letter].width = COL_WIDTHS[col_letter]
+    ws.row_dimensions[1].height = 21
+    ws.freeze_panes = "A2"
+
+
+def calculate_row_height(cell_value, column_width, font_size=11):
+    if not cell_value:
+        return 15
+    pixels_per_column_unit = 7
+    column_pixels = column_width * pixels_per_column_unit
+    chars_per_line = max(1, int(column_pixels / 7))
+    lines = []
+    for segment in str(cell_value).split("\\n"):
+        if not segment:
+            lines.append(1)
+            continue
+        lines_needed = math.ceil(len(segment) / chars_per_line)
+        lines.append(max(1, lines_needed))
+    total_lines = sum(lines)
+    row_height = total_lines * 15 + 4
+    return max(15, row_height)
+
+
+def style_new_rows(ws, from_row):
+    if from_row > ws.max_row:
+        return
+    if ws.column_dimensions["A"].width is None or ws.column_dimensions["A"].width == 0:
+        for col_letter, width in COL_WIDTHS.items():
+            ws.column_dimensions[col_letter].width = width
+    b = thin_border()
+    fmt = "DD/MM/YY HH:MM:SS"
+    col_widths = {1: COL_WIDTHS["A"], 2: COL_WIDTHS["B"], 3: COL_WIDTHS["C"], 4: COL_WIDTHS["D"], 5: COL_WIDTHS["E"]}
+    for row_num in range(from_row, ws.max_row + 1):
+        max_row_height = 15
+        for col_num in range(1, 6):
+            cell = ws.cell(row=row_num, column=col_num)
+            cell.border = b
+            cell.alignment = Alignment(wrap_text=True, vertical="bottom")
+            if col_num == 1 and cell.value is not None:
+                cell.number_format = fmt
+            if cell.value is not None:
+                height_needed = calculate_row_height(str(cell.value), col_widths.get(col_num, 20))
+                if height_needed > max_row_height:
+                    max_row_height = height_needed
+        ws.row_dimensions[row_num].height = max_row_height
+
+
+def sanitise_sheet_name(name):
+    cleaned = re.sub(r"[\\[\\]*?/\\\\:]", "", name).strip()
+    return cleaned[:31]
+
+
+def parse_timestamp(raw):
+    try:
+        return datetime.strptime(raw.strip(), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
+def parse_raw_lines(lines):
+    rows = []
+    for line in lines:
+        line = line.strip()
+        if not line or "|" not in line:
+            continue
+        parts = line.split("|")
+        if len(parts) < 13:
+            continue
+        if parts[0].strip() == "timestamp":
+            continue
+        ts = parse_timestamp(parts[IDX_TS])
+        if ts is None:
+            print(f"  Skipping unrecognised timestamp: {parts[IDX_TS][:30]}")
+            continue
+        rg_raw = parts[IDX_RG].strip().replace("AWS#AWS", "AWS")
+        ri_raw = parts[IDX_RI].strip().replace("AWS#AWS", "AWS")
+        uri = parts[IDX_URI].strip()
+        args = parts[IDX_ARG].strip() if len(parts) > IDX_ARG else ""
+        if uri.startswith("="): uri = "'" + uri
+        if args.startswith("="): args = "'" + args
+        rg_list = [v.strip() for v in rg_raw.split(";") if v.strip()]
+        ri_list = [v.strip() for v in ri_raw.split(";") if v.strip()]
+        pair_count = max(len(rg_list), len(ri_list), 1)
+        for p in range(pair_count):
+            rg = rg_list[p] if p < len(rg_list) else ""
+            ri = (ri_list[p] if p < len(ri_list) else "")[:31]
+            if rg or ri:
+                rows.append((ts, rg, ri, uri, args))
+    return rows
+
+
+def append_to_consolidation(wb, raw_text):
+    print("=== Processing pasted data ===")
+    lines = [l for l in raw_text.splitlines() if l.strip()]
+    if not lines:
+        print("  No data pasted -- skipping.")
+        return
+    rows = parse_raw_lines(lines)
+    if not rows:
+        print("  No valid rows parsed from pasted data.")
+        return
+    print(f"  Parsed {len(rows)} rows from pasted data.")
+
+    if "ConsolidationSheet" not in wb.sheetnames:
+        ws = wb.create_sheet("ConsolidationSheet")
+        style_header_row(ws)
+        print("  Created ConsolidationSheet.")
+    else:
+        ws = wb["ConsolidationSheet"]
+        print(f"  ConsolidationSheet has {ws.max_row - 1} existing rows -- appending.")
+
+    existing = set()
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        existing.add("|".join(str(c) if c is not None else "" for c in row))
+
+    first_new_row = ws.max_row + 1
+    added = 0
+    for (ts, rg, ri, uri, args) in rows:
+        key = "|".join([str(ts), rg, ri, uri, args or ""])
+        if key in existing:
+            continue
+        existing.add(key)
+        ws.append([ts, rg, ri, uri, args or None])
+        added += 1
+    print(f"  Added {added} new rows to ConsolidationSheet.")
+    if added > 0:
+        style_new_rows(ws, first_new_row)
+
+
+def create_rule_sheets(wb):
+    print("=== CreateRuleSheets ===")
+    if "ConsolidationSheet" not in wb.sheetnames:
+        print("  ERROR: ConsolidationSheet not found.")
+        return
+    ws_con = wb["ConsolidationSheet"]
+    headers_row = [c.value for c in ws_con[1]]
+    try:
+        rule_col = headers_row.index("Rule")
+    except ValueError:
+        print("  ERROR: 'Rule' column not found in ConsolidationSheet.")
+        return
+
+    all_con_rows = list(ws_con.iter_rows(min_row=2, values_only=True))
+    rule_groups = defaultdict(list)
+    for row in all_con_rows:
+        raw_rule = row[rule_col]
+        if not raw_rule:
+            continue
+        rule_groups[sanitise_sheet_name(str(raw_rule))].append(row)
+
+    print(f"  {len(rule_groups)} unique rules in ConsolidationSheet.")
+    total_added = 0
+    for sheet_name, con_rows in rule_groups.items():
+        if sheet_name not in wb.sheetnames:
+            ws = wb.create_sheet(sheet_name)
+            style_header_row(ws)
+            existing = set()
+        else:
+            ws = wb[sheet_name]
+            existing = set()
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                existing.add("|".join(str(c) if c is not None else "" for c in row))
+
+        first_new_row = ws.max_row + 1
+        added = 0
+        for row in con_rows:
+            key = "|".join(str(c) if c is not None else "" for c in row)
+            if key in existing:
+                continue
+            existing.add(key)
+            ws.append(list(row))
+            added += 1
+        if added > 0:
+            style_new_rows(ws, first_new_row)
+            total_added += added
+        status = f"+{added} new" if added > 0 else "already up to date"
+        print(f"  [{sheet_name}] {status}")
+    print(f"  Total new rows added across all rule sheets: {total_added}")
+
+
+def generate_monthly_report(wb):
+    print("=== GenerateMonthlyReport ===")
+    if "ConsolidationSheet" not in wb.sheetnames:
+        print("  ERROR: ConsolidationSheet not found.")
+        return
+
+    ws_con = wb["ConsolidationSheet"]
+    date_idx, rg_idx, rule_idx = 0, 1, 2
+    counts = defaultdict(lambda: defaultdict(int))
+    all_dates = set()
+    month_name = ""
+
+    for row in ws_con.iter_rows(min_row=2, values_only=True):
+        dt_val = row[date_idx]
+        rg_val = row[rg_idx] or ""
+        rule_val = row[rule_idx] or ""
+        if dt_val is None:
+            continue
+        if isinstance(dt_val, datetime):
+            dt = dt_val
+        elif isinstance(dt_val, (int, float)):
+            dt = datetime(1899, 12, 30) + timedelta(days=dt_val)
+        else:
+            continue
+        date_str = dt.strftime("%d/%m/%y")
+        all_dates.add(date_str)
+        if not month_name:
+            month_name = dt.strftime("%B")
+        counts[(rg_val, rule_val)][date_str] += 1
+
+    if not counts:
+        print("  No data found.")
+        return
+
+    sorted_dates = sorted(all_dates, key=lambda s: datetime.strptime(s, "%d/%m/%y"))
+    rule_sets_ordered = sorted(set(k[0] for k in counts))
+
+    pivot_rows = []
+    grand_total_by_date = defaultdict(int)
+    for rs in rule_sets_ordered:
+        rs_totals = defaultdict(int)
+        child_rows = []
+        for rule in sorted(set(k[1] for k in counts if k[0] == rs)):
+            rc = counts[(rs, rule)]
+            for d, v in rc.items():
+                rs_totals[d] += v
+                grand_total_by_date[d] += v
+            child_rows.append((rule, rc))
+        pivot_rows.append((rs, True, dict(rs_totals)))
+        for (rule, rc) in child_rows:
+            pivot_rows.append((rule, False, dict(rc)))
+
+    if "Consolidation" in wb.sheetnames:
+        del wb["Consolidation"]
+    ws2 = wb.create_sheet("Consolidation")
+
+    header = [f"WAF US PRD {month_name}"]
+    for ds in sorted_dates:
+        header.append(f"{month_name[:3]} {int(ds[:2])}")
+    header.append("Grand Total")
+
+    green_fill = PatternFill("solid", fgColor=GREEN_PIVOT)
+    bold_font = Font(bold=True, color=BLACK)
+    centre = Alignment(horizontal="center", vertical="center")
+    b = thin_border()
+
+    for col_idx, val in enumerate(header, 1):
+        cell = ws2.cell(row=1, column=col_idx, value=val)
+        cell.fill = green_fill; cell.font = bold_font
+        cell.alignment = centre; cell.border = b
+        cell.number_format = "@"
+
+    ws2.row_dimensions[1].height = 26.25
+    ws2.column_dimensions["A"].width = 30.7
+    ws2.freeze_panes = "A2"
+
+    wrap_align = Alignment(wrap_text=True)
+    for (label, is_rs, day_counts) in pivot_rows:
+        row_data = [label]
+        for ds in sorted_dates:
+            v = day_counts.get(ds)
+            row_data.append(v if v else None)
+        row_data.append(sum(day_counts.values()) or None)
+        rn = ws2.max_row + 1
+        for ci, val in enumerate(row_data, 1):
+            cell = ws2.cell(row=rn, column=ci, value=val)
+            cell.border = b; cell.alignment = wrap_align
+            if is_rs: cell.font = Font(bold=True)
+
+    gt_row = ["Grand Total"]
+    grand_total = 0
+    for ds in sorted_dates:
+        v = grand_total_by_date.get(ds, 0)
+        gt_row.append(v if v else None)
+        grand_total += v
+    gt_row.append(grand_total or None)
+    rn = ws2.max_row + 1
+    for ci, val in enumerate(gt_row, 1):
+        cell = ws2.cell(row=rn, column=ci, value=val)
+        cell.fill = green_fill; cell.font = bold_font
+        cell.alignment = centre; cell.border = b
+
+    for col_idx in range(2, len(header) + 1):
+        ws2.column_dimensions[get_column_letter(col_idx)].width = 8
+
+    wb["ConsolidationSheet"].title = "ConsolidationSheet-old"
+    print(f"  Consolidation sheet written -- {len(sorted_dates)} date cols, "
+          f"{len(pivot_rows)} rule rows, grand total {grand_total}.")
+
+
+def inspect_existing():
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        wb = load_workbook("/input.xlsx")
+        print(f"Sheets found: {', '.join(wb.sheetnames)}")
+        if "ConsolidationSheet" in wb.sheetnames:
+            ws = wb["ConsolidationSheet"]
+            print(f"ConsolidationSheet: {ws.max_row - 1} existing rows")
+        skip = {"ConsolidationSheet", "ConsolidationSheet-old", "Consolidation"}
+        rule_sheets = [s for s in wb.sheetnames if s not in skip]
+        print(f"{len(rule_sheets)} rule sheet(s) present")
+    return buf.getvalue()
+
+
+def run_pipeline(raw_text, do_monthly, has_existing):
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        if has_existing and os.path.exists("/input.xlsx"):
+            wb = load_workbook("/input.xlsx")
+            print("Opened existing WAF_Report.xlsx")
+        else:
+            wb = Workbook()
+            wb.remove(wb.active)
+            print("Creating new WAF_Report.xlsx")
+
+        append_to_consolidation(wb, raw_text)
+
+        if "ConsolidationSheet" in wb.sheetnames:
+            create_rule_sheets(wb)
+
+        if do_monthly:
+            generate_monthly_report(wb)
+
+        wb.save("/output.xlsx")
+        print("Done. Saved -> WAF_Report.xlsx")
+    return buf.getvalue()
+`;
+
+async function boot() {
+  setStatus('Loading Python engine (first run only, ~15-25s)…', true);
+  pyodide = await loadPyodide();
+  await pyodide.loadPackage('micropip');
+  const micropip = pyodide.pyimport('micropip');
+  setStatus('Installing openpyxl…', true);
+  await micropip.install('openpyxl');
+  setStatus('Preparing engine…', true);
+  await pyodide.runPythonAsync(PY_ENGINE);
+  setStatus('Ready.', false);
+  runBtn.disabled = false;
+  runBtn.textContent = 'Process & Update Report';
+}
+
+fileInput.addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file || !pyodide) return;
+  setStatus('Reading ' + file.name + '…', true);
+  const buf = await file.arrayBuffer();
+  pyodide.FS.writeFile('/input.xlsx', new Uint8Array(buf));
+  hasExisting = true;
+  try {
+    const info = pyodide.globals.get('inspect_existing')();
+    fileStatus.textContent = 'Loaded ' + file.name;
+    fileStatus.classList.add('loaded');
+    logAppend('--- Loaded ' + file.name + ' ---');
+    info.split('\n').forEach(l => { if (l) logAppend(l); });
+    clearFileBtn.style.display = 'inline-flex';
+  } catch (err) {
+    fileStatus.textContent = 'Could not read that file — is it a valid .xlsx?';
+    fileStatus.classList.remove('loaded');
+    hasExisting = false;
+  }
+  setStatus('Ready.', false);
+});
+
+clearFileBtn.addEventListener('click', () => {
+  hasExisting = false;
+  fileInput.value = '';
+  fileStatus.textContent = 'No file loaded — will create a new workbook.';
+  fileStatus.classList.remove('loaded');
+  clearFileBtn.style.display = 'none';
+  logAppend('--- Starting fresh (no existing file) ---');
+});
+
+runBtn.addEventListener('click', async () => {
+  runBtn.disabled = true;
+  downloadBtn.style.display = 'none';
+  setStatus('Processing…', true);
+  try {
+    const fn = pyodide.globals.get('run_pipeline');
+    const log = fn(rawInput.value, monthlyCheck.checked, hasExisting);
+    log.split('\n').forEach(l => { if (l.trim() !== '') logAppend(l); });
+
+    const data = pyodide.FS.readFile('/output.xlsx');
+    const blob = new Blob([data], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const url = URL.createObjectURL(blob);
+    downloadBtn.href = url;
+    downloadBtn.style.display = 'inline-flex';
+
+    // chain: next run continues from this output
+    pyodide.FS.writeFile('/input.xlsx', data);
+    hasExisting = true;
+    fileStatus.textContent = 'Working from this run\'s output — load a different file to override.';
+    fileStatus.classList.add('loaded');
+
+    setStatus('Done. Download ready below.', false);
+  } catch (err) {
+    logAppend('ERROR: ' + err.message);
+    setStatus('Something went wrong — see log.', false);
+  }
+  runBtn.disabled = false;
+});
+
+boot();
+</script>
+
+</body>
+</html>
