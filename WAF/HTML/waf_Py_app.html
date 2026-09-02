@@ -343,6 +343,10 @@ def style_new_rows(ws, from_row):
                 height_needed = calculate_row_height(str(cell.value), col_widths.get(col_num, 20))
                 if height_needed > max_row_height:
                     max_row_height = height_needed
+        no_border = Border()
+        for extra_col in range(6, 11):
+            cell = ws.cell(row=row_num, column=extra_col)
+            cell.border = no_border
         ws.row_dimensions[row_num].height = max_row_height
 
 
@@ -581,8 +585,10 @@ def generate_monthly_report(wb):
         cell.fill = green_fill; cell.font = bold_font
         cell.alignment = centre; cell.border = b
 
-    for col_idx in range(2, len(header) + 1):
-        ws2.column_dimensions[get_column_letter(col_idx)].width = 8
+    for col_idx in range(2, len(header)):
+        ws2.column_dimensions[get_column_letter(col_idx)].width = 4.29
+    # Grand Total column — last column
+    ws2.column_dimensions[get_column_letter(len(header))].width = 10.71
 
     wb["ConsolidationSheet"].title = "ConsolidationSheet-old"
     print(f"  Consolidation sheet written -- {len(sorted_dates)} date cols, "
